@@ -1,0 +1,223 @@
+name: Auto-triage issues
+
+on:
+  issues:
+    types: [opened, edited, reopened]
+
+permissions:
+  issues: write
+  contents: read
+
+concurrency:
+  group: triage-issue-${{ github.event.issue.number }}
+  cancel-in-progress: false
+
+jobs:
+  triage:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/github-script@v7
+        with:
+          script: |
+            // --- KEEP IN SYNC WITH triage-tests/classify.mjs ---
+            const MARKER = '<!-- auto-triage-bot:v2 -->';
+            const DOCS_BASE = 'https://learn.microsoft.com/en-us/azure/templates';
+            const UA = 'bicep-types-az-triage-bot/2.0';
+
+            const RP_REGEX = /\bMicrosoft\.[A-Za-z][A-Za-z0-9]*/gi;
+            const TYPE_REGEX = /\bMicrosoft\.[A-Za-z][A-Za-z0-9]*(?:\/[A-Za-z][A-Za-z0-9]*)+/gi;
+
+            const MISSING_PROPERTY_REGEXES = [
+              /\bmissing\b[^.\n]{0,60}\b(propert|field|attribute)/i,
+              /\b(propert(y|ies)|field|attribute)\s+\S+\s+(is|are)\s+missing\b/i,
+              /\b(does(\s+not|n['']?t)|do(\s+not|n['']?t))\s+(have|expose|include|support|define|list)\b[^.\n]{0,60}\b(propert|field|attribute)/i,
+              /\b(should|needs?\s+to)\s+(have|expose|include|support|define|list|add)\b[^.\n]{0,60}\b(propert|field|attribute)/i,
+              /\black(s|ing)?\b[^.\n]{0,60}\b(propert|field|attribute)/i,
+              /\bunrecognized\s+propert/i,
+              /\b(propert(y|ies)|field|attribute)\s+\S+\s+(does(\s+not|n['']?t)\s+exist|is\s+not\s+(defined|exposed|present|available|listed))/i,
+              /\badd\s+[`'\w.\s]{0,40}(propert(y|ies)|field|attribute)\b/i,
+              /\bexpose\s+[`'\w.\s]{0,40}(propert|field|attribute)/i,
+              /\bnot\s+exposed\s+in\s+the\s+(type|schema|api)/i,
+            ];
+
+            function normalizeNs(raw) {
+              const suffix = raw.slice('Microsoft.'.length);
+              const uniform = suffix === suffix.toLowerCase() || suffix === suffix.toUpperCase();
+              const norm = uniform
+                ? suffix[0].toUpperCase() + suffix.slice(1).toLowerCase()
+                : suffix;
+              return 'Microsoft.' + norm;
+            }
+
+            function classify(text) {
+              const rpMap = new Map();
+              for (const m of text.matchAll(RP_REGEX)) {
+                const c = normalizeNs(m[0]);
+                if (!rpMap.has(c.toLowerCase())) rpMap.set(c.toLowerCase(), c);
+              }
+              const typeMap = new Map();
+              for (const m of text.matchAll(TYPE_REGEX)) {
+                const [ns, ...rest] = m[0].split('/');
+                const c = [normalizeNs(ns), ...rest].join('/');
+                if (!typeMap.has(c.toLowerCase())) typeMap.set(c.toLowerCase(), c);
+              }
+              return {
+                rps: [...rpMap.values()],
+                types: [...typeMap.values()],
+                typeIssue: MISSING_PROPERTY_REGEXES.some(r => r.test(text)),
+              };
+            }
+
+            async function validateType(type) {
+              const url = `${DOCS_BASE}/${type.toLowerCase()}`;
+              try {
+                let res = await fetch(url, {
+                  method: 'HEAD', redirect: 'follow', headers: { 'User-Agent': UA },
+                });
+                if (res.status === 405) {
+                  res = await fetch(url, {
+                    method: 'GET', redirect: 'follow', headers: { 'User-Agent': UA },
+                  });
+                }
+                return { valid: res.ok, status: res.status, url };
+              } catch (e) {
+                return { valid: null, status: null, url, error: e.message };
+              }
+            }
+
+            function hashColor(s) {
+              let h = 5381;
+              for (let i = 0; i < s.length; i++) h = ((h << 5) + h + s.charCodeAt(i)) & 0xffffff;
+              return h.toString(16).padStart(6, '0');
+            }
+
+            // --- run ---
+            const { owner, repo } = context.repo;
+            const issue = context.payload.issue;
+            const num = issue.number;
+            const action = context.payload.action;
+
+            if (issue.state === 'closed') {
+              core.info('Issue already closed, skipping.');
+              return;
+            }
+
+            const text = `${issue.title || ''}\n\n${issue.body || ''}`;
+            const { rps, types, typeIssue } = classify(text);
+            core.info(`Extracted rps=[${rps.join(', ')}] types=[${types.join(', ')}] typeIssue=${typeIssue}`);
+
+            // Policy: no fully-qualified type -> leave the issue untouched.
+            if (types.length === 0) {
+              core.info('No type detected. Leaving untriaged per policy.');
+              return;
+            }
+
+            // Validate every type against learn.microsoft.com. Drop 404s and network errors.
+            const validatedTypes = [];
+            for (const t of types) {
+              const v = await validateType(t);
+              core.info(`Validate ${t}: valid=${v.valid} status=${v.status}`);
+              if (v.valid === true) validatedTypes.push(t);
+            }
+
+            if (validatedTypes.length === 0) {
+              core.info('No detected type validated against docs. Leaving untriaged.');
+              return;
+            }
+
+            // RP labels are derived from VALIDATED types only — filters Microsoft.Com etc.
+            const validatedRps = [...new Set(validatedTypes.map(t => t.split('/')[0]))];
+
+            // Idempotency: if we've already triaged this issue, don't re-comment or re-close.
+            const priorComments = await github.paginate(github.rest.issues.listComments, {
+              owner, repo, issue_number: num, per_page: 100,
+            });
+            const alreadyTriaged = priorComments.some(c =>
+              c.user && c.user.type === 'Bot' && (c.body || '').includes(MARKER)
+            );
+
+            // --- Apply labels (auto) ---
+            const labelsToApply = [...validatedRps];
+            if (typeIssue) labelsToApply.push('type issue');
+
+            for (const label of labelsToApply) {
+              try {
+                await github.rest.issues.getLabel({ owner, repo, name: label });
+              } catch (e) {
+                if (e.status !== 404) throw e;
+                try {
+                  await github.rest.issues.createLabel({
+                    owner, repo, name: label,
+                    color: hashColor(label),
+                    description: label === 'type issue'
+                      ? 'Issue reports a missing property on an ARM type'
+                      : `Issues related to the ${label} resource provider`,
+                  });
+                  core.info(`Created label ${label}`);
+                } catch (createErr) {
+                  if (createErr.status !== 422) throw createErr;
+                }
+              }
+            }
+            await github.rest.issues.addLabels({
+              owner, repo, issue_number: num, labels: labelsToApply,
+            });
+            core.info(`Applied labels: ${labelsToApply.join(', ')}`);
+
+            // --- Duplicate detection on validated types ---
+            let duplicateOf = null;
+            if (!alreadyTriaged) {
+              outer: for (const type of validatedTypes) {
+                const q = `repo:${owner}/${repo} is:issue is:open "${type}"`;
+                const { data } = await github.rest.search.issuesAndPullRequests({ q, per_page: 30 });
+                const candidates = [];
+                for (const item of data.items) {
+                  if (item.number === num) continue;
+                  if (item.pull_request) continue;
+                  if (new Date(item.created_at) >= new Date(issue.created_at)) continue;
+                  const full = await github.rest.issues.get({
+                    owner, repo, issue_number: item.number,
+                  });
+                  const haystack = `${full.data.title}\n${full.data.body || ''}`.toLowerCase();
+                  if (haystack.includes(type.toLowerCase())) candidates.push(full.data);
+                }
+                if (candidates.length === 0) continue;
+                candidates.sort((a, b) => new Date(a.created_at) - new Date(b.created_at));
+                duplicateOf = { canonical: candidates[0], type };
+                break outer;
+              }
+            }
+
+            // --- Close as duplicate OR post acknowledgement ---
+            if (duplicateOf) {
+              const { canonical, type } = duplicateOf;
+              const body =
+                `${MARKER}\n` +
+                `This issue references the same type \`${type}\` as #${canonical.number} ` +
+                `(opened ${canonical.created_at.slice(0, 10)}). ` +
+                `Closing as a duplicate — please continue the discussion there.\n\n` +
+                `_Auto-triaged. If this is wrong, reopen and a maintainer will review._`;
+              await github.rest.issues.createComment({ owner, repo, issue_number: num, body });
+              await github.rest.issues.update({
+                owner, repo, issue_number: num,
+                state: 'closed', state_reason: 'not_planned',
+              });
+              core.notice(`Closed #${num} as duplicate of #${canonical.number} (type: ${type})`);
+              return;
+            }
+
+            if (!alreadyTriaged && action === 'opened') {
+              const lines = [MARKER, 'Thanks for the report! Auto-triage detected:', ''];
+              lines.push(`- **Resource provider${validatedRps.length > 1 ? 's' : ''}:** ` +
+                validatedRps.map(r => `\`${r}\``).join(', '));
+              lines.push(`- **Type${validatedTypes.length > 1 ? 's' : ''} (verified in docs):** ` +
+                validatedTypes.map(t => `\`${t}\``).join(', '));
+              if (typeIssue) {
+                lines.push(`- Detected language about a missing property — labeled \`type issue\`.`);
+              }
+              lines.push('', 'A maintainer will follow up.');
+              await github.rest.issues.createComment({
+                owner, repo, issue_number: num, body: lines.join('\n'),
+              });
+              core.info('Posted acknowledgement comment.');
+            }
