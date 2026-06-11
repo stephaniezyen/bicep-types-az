@@ -77,7 +77,7 @@ jobs:
         working-directory: bicep-types-az.generator
 
       - name: Create Pull Request
-        uses: peter-evans/create-pull-request@v3
+        uses: peter-evans/create-pull-request@v8
         with:
           path: bicep-types-az
           commit-message: Generate types for https://github.com/Azure/azure-rest-api-specs/tree/${{ env.rest_api_sha }}
