@@ -16,10 +16,13 @@ jobs:
   triage:
     runs-on: ubuntu-latest
     steps:
+      - uses: actions/checkout@v4
+
       - uses: actions/github-script@v7
         with:
           script: |
             // --- KEEP IN SYNC WITH triage-tests/classify.mjs ---
+            const fs = require('fs');
             const MARKER = '<!-- auto-triage-bot:v2 -->';
             const DOCS_BASE = 'https://learn.microsoft.com/en-us/azure/templates';
             const UA = 'bicep-types-az-triage-bot/2.0';
@@ -38,6 +41,18 @@ jobs:
               /\badd\s+[`'\w.\s]{0,40}(propert(y|ies)|field|attribute)\b/i,
               /\bexpose\s+[`'\w.\s]{0,40}(propert|field|attribute)/i,
               /\bnot\s+exposed\s+in\s+the\s+(type|schema|api)/i,
+            ];
+
+            const PROPERTY_NAME_REGEXES = [
+              /\bmissing\b[^.\n]{0,60}?[`'"]([A-Za-z_][\w.-]*)[`'"]\s+(?:propert(?:y|ies)|field|attribute)/i,
+              /\b(?:propert(?:y|ies)|field|attribute)\s+[`'"]?([A-Za-z_][\w.-]*)[`'"]?\s+(?:is|are)\s+missing\b/i,
+              /\b(?:does(?:\s+not|n['']?t)|do(?:\s+not|n['']?t))\s+(?:have|expose|include|support|define|list)\b[^.\n]{0,60}?[`'"]([A-Za-z_][\w.-]*)[`'"]\s+(?:propert(?:y|ies)|field|attribute)/i,
+              /\b(?:should|needs?\s+to)\s+(?:have|expose|include|support|define|list|add)\b[^.\n]{0,60}?[`'"]([A-Za-z_][\w.-]*)[`'"]\s+(?:propert(?:y|ies)|field|attribute)/i,
+              /\black(?:s|ing)?\b[^.\n]{0,60}?[`'"]([A-Za-z_][\w.-]*)[`'"]\s+(?:propert(?:y|ies)|field|attribute)/i,
+              /\bunrecognized\s+propert(?:y|ies)?\s+[`'"]?([A-Za-z_][\w.-]*)[`'"]?/i,
+              /\b(?:propert(?:y|ies)|field|attribute)\s+[`'"]?([A-Za-z_][\w.-]*)[`'"]?\s+(?:does(?:\s+not|n['']?t)\s+exist|is\s+not\s+(?:defined|exposed|present|available|listed))/i,
+              /\badd\s+[`'"]?([A-Za-z_][\w.-]*)[`'"]?\s+(?:propert(?:y|ies)|field|attribute)\b/i,
+              /\bexpose\s+[`'"]?([A-Za-z_][\w.-]*)[`'"]?\s+(?:propert|field|attribute)/i,
             ];
 
             function normalizeNs(raw) {
@@ -65,11 +80,21 @@ jobs:
                 rps: [...rpMap.values()],
                 types: [...typeMap.values()],
                 typeIssue: MISSING_PROPERTY_REGEXES.some(r => r.test(text)),
+                missingProperty: extractMissingProperty(text),
               };
             }
 
-            async function validateType(type) {
-              const url = `${DOCS_BASE}/${type.toLowerCase()}`;
+            function extractMissingProperty(text) {
+              for (const regex of PROPERTY_NAME_REGEXES) {
+                const match = regex.exec(text);
+                if (match?.[1]) return match[1];
+              }
+
+              return null;
+            }
+
+            async function validateDocsPath(path) {
+              const url = `${DOCS_BASE}/${path.toLowerCase()}`;
               try {
                 let res = await fetch(url, {
                   method: 'HEAD', redirect: 'follow', headers: { 'User-Agent': UA },
@@ -85,62 +110,22 @@ jobs:
               }
             }
 
+            async function validateType(type) {
+              return validateDocsPath(type);
+            }
+
+            function validateNamespace(ns) {
+              const path = `generated/types/${ns.toLowerCase()}`;
+              return { valid: fs.existsSync(path), status: null, url: path };
+            }
+
             function hashColor(s) {
               let h = 5381;
               for (let i = 0; i < s.length; i++) h = ((h << 5) + h + s.charCodeAt(i)) & 0xffffff;
               return h.toString(16).padStart(6, '0');
             }
 
-            // --- run ---
-            const { owner, repo } = context.repo;
-            const issue = context.payload.issue;
-            const num = issue.number;
-            const action = context.payload.action;
-
-            if (issue.state === 'closed') {
-              core.info('Issue already closed, skipping.');
-              return;
-            }
-
-            const text = `${issue.title || ''}\n\n${issue.body || ''}`;
-            const { rps, types, typeIssue } = classify(text);
-            core.info(`Extracted rps=[${rps.join(', ')}] types=[${types.join(', ')}] typeIssue=${typeIssue}`);
-
-            // Policy: no fully-qualified type -> leave the issue untouched.
-            if (types.length === 0) {
-              core.info('No type detected. Leaving untriaged per policy.');
-              return;
-            }
-
-            // Validate every type against learn.microsoft.com. Drop 404s and network errors.
-            const validatedTypes = [];
-            for (const t of types) {
-              const v = await validateType(t);
-              core.info(`Validate ${t}: valid=${v.valid} status=${v.status}`);
-              if (v.valid === true) validatedTypes.push(t);
-            }
-
-            if (validatedTypes.length === 0) {
-              core.info('No detected type validated against docs. Leaving untriaged.');
-              return;
-            }
-
-            // RP labels are derived from VALIDATED types only — filters Microsoft.Com etc.
-            const validatedRps = [...new Set(validatedTypes.map(t => t.split('/')[0]))];
-
-            // Idempotency: if we've already triaged this issue, don't re-comment or re-close.
-            const priorComments = await github.paginate(github.rest.issues.listComments, {
-              owner, repo, issue_number: num, per_page: 100,
-            });
-            const alreadyTriaged = priorComments.some(c =>
-              c.user && c.user.type === 'Bot' && (c.body || '').includes(MARKER)
-            );
-
-            // --- Apply labels (auto) ---
-            const labelsToApply = [...validatedRps];
-            if (typeIssue) labelsToApply.push('type issue');
-
-            for (const label of labelsToApply) {
+            async function ensureLabel(label) {
               try {
                 await github.rest.issues.getLabel({ owner, repo, name: label });
               } catch (e) {
@@ -159,10 +144,79 @@ jobs:
                 }
               }
             }
+
+            // --- run ---
+            const { owner, repo } = context.repo;
+            const issue = context.payload.issue;
+            const num = issue.number;
+            const action = context.payload.action;
+
+            if (issue.state === 'closed') {
+              core.info('Issue already closed, skipping.');
+              return;
+            }
+
+            const text = `${issue.title || ''}\n\n${issue.body || ''}`;
+            const { rps, types, typeIssue, missingProperty } = classify(text);
+            core.info(`Extracted rps=[${rps.join(', ')}] types=[${types.join(', ')}] typeIssue=${typeIssue} missingProperty=${missingProperty || ''}`);
+
+            // Validate namespaces before labeling so URL false positives like Microsoft.Com are ignored.
+            const validatedRps = [];
+            for (const rp of rps) {
+              const v = await validateNamespace(rp);
+              core.info(`Validate ${rp}: valid=${v.valid} status=${v.status}`);
+              if (v.valid === true) validatedRps.push(rp);
+            }
+
+            if (validatedRps.length === 0) {
+              core.info('No detected resource provider matched generated types. Leaving untriaged.');
+              return;
+            }
+
+            // Validate every type against learn.microsoft.com. Drop 404s and network errors.
+            const validatedTypes = [];
+            for (const t of types) {
+              const v = await validateType(t);
+              core.info(`Validate ${t}: valid=${v.valid} status=${v.status}`);
+              if (v.valid === true) validatedTypes.push(t);
+            }
+
+            // Idempotency: if we've already triaged this issue, don't re-comment or re-close.
+            const priorComments = await github.paginate(github.rest.issues.listComments, {
+              owner, repo, issue_number: num, per_page: 100,
+            });
+            const alreadyTriaged = priorComments.some(c =>
+              c.user && c.user.type === 'Bot' && (c.body || '').includes(MARKER)
+            );
+
+            // --- Apply labels (auto) ---
+            const labelsToApply = [...validatedRps];
+            if (typeIssue && validatedTypes.length > 0) labelsToApply.push('type issue');
+
+            for (const label of labelsToApply) {
+              await ensureLabel(label);
+            }
             await github.rest.issues.addLabels({
               owner, repo, issue_number: num, labels: labelsToApply,
             });
             core.info(`Applied labels: ${labelsToApply.join(', ')}`);
+
+            if (validatedTypes.length === 0) {
+              core.info('No validated type detected; resource provider labels applied only.');
+              return;
+            }
+
+            if (typeIssue) {
+              const propertyName = missingProperty || 'unknown';
+              const normalizedTitle = `[${validatedTypes[0]}]: ${propertyName} property missing`;
+              if (issue.title !== normalizedTitle) {
+                await github.rest.issues.update({
+                  owner, repo, issue_number: num,
+                  title: normalizedTitle,
+                });
+                core.info(`Renamed issue to: ${normalizedTitle}`);
+              }
+            }
 
             // --- Duplicate detection on validated types ---
             let duplicateOf = null;
@@ -210,9 +264,11 @@ jobs:
               const lines = [MARKER, 'Thanks for the report! Auto-triage detected:', ''];
               lines.push(`- **Resource provider${validatedRps.length > 1 ? 's' : ''}:** ` +
                 validatedRps.map(r => `\`${r}\``).join(', '));
-              lines.push(`- **Type${validatedTypes.length > 1 ? 's' : ''} (verified in docs):** ` +
-                validatedTypes.map(t => `\`${t}\``).join(', '));
-              if (typeIssue) {
+              if (validatedTypes.length > 0) {
+                lines.push(`- **Type${validatedTypes.length > 1 ? 's' : ''} (verified in docs):** ` +
+                  validatedTypes.map(t => `\`${t}\``).join(', '));
+              }
+              if (typeIssue && validatedTypes.length > 0) {
                 lines.push(`- Detected language about a missing property — labeled \`type issue\`.`);
               }
               lines.push('', 'A maintainer will follow up.');
