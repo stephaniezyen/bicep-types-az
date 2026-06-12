@@ -134,7 +134,11 @@ jobs:
                   await github.rest.issues.createLabel({
                     owner, repo, name: label,
                     color: hashColor(label),
-                    description: `Issues related to the ${label} resource provider`,
+                    description: label === 'type issue'
+                      ? 'Issue references a specific ARM resource type'
+                      : label === 'missing property'
+                        ? 'Issue reports a missing property on an ARM resource type'
+                        : `Issues related to the ${label} resource provider`,
                   });
                   core.info(`Created label ${label}`);
                 } catch (createErr) {
@@ -189,6 +193,8 @@ jobs:
 
             // --- Apply labels (auto) ---
             const labelsToApply = [...validatedRps];
+            if (validatedTypes.length > 0) labelsToApply.push('type issue');
+            if (typeIssue && validatedTypes.length > 0) labelsToApply.push('missing property');
 
             for (const label of labelsToApply) {
               await ensureLabel(label);
@@ -266,7 +272,7 @@ jobs:
                   validatedTypes.map(t => `\`${t}\``).join(', '));
               }
               if (typeIssue && validatedTypes.length > 0) {
-                lines.push(`- Detected language about a missing property and normalized the issue title.`);
+                lines.push(`- Detected language about a missing property — labeled \`missing property\` and normalized the issue title.`);
               }
               lines.push('', 'A maintainer will follow up.');
               await github.rest.issues.createComment({
