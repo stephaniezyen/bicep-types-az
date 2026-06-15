@@ -35,7 +35,7 @@ Some issues are filed without the template, or were imported from upstream with 
 - **Api Version** — look for `@YYYY-MM-DD(-preview|-beta|...)?` adjacent to the type, or a line "Api Version: ..." / "api-version=...", or a date inside a docs URL the user pasted.
 - **Issue Type** — infer from phrasing (see Step 3's "phrasing cues"). If you cannot confidently pick one of the 11 dropdown options, treat the Issue Type as **unknown** and follow the "unknown Issue Type" branch in Step 4.
 
-If you cannot extract a `Resource Type` at all (no `Microsoft.X/Y` anywhere), do nothing except leave `Needs: Triage :mag:` in place. Stop.
+If you cannot extract a `Resource Type` at all (no `Microsoft.X/Y` anywhere), do nothing except leave `needs: triage` in place. Stop.
 
 ---
 
@@ -110,7 +110,7 @@ Apply the label from the table in Step 3. Do not fetch docs. Do not comment.
 
 ### Branch D — Issue Type is `Other` or unknown (template not used, prose ambiguous)
 
-Apply only the RP label (if extractable). Do not apply a category label. Leave `Needs: Triage :mag:` in place. Do not comment.
+Apply only the RP label (if extractable). Do not apply a category label. Leave `needs: triage` in place. Do not comment.
 
 ---
 
@@ -133,8 +133,8 @@ If multiple distinct candidates tie on Resource Type + Issue Type, link to the s
 
 ## Step 6 — Finalize
 
-- If you applied **any** of {`type issue`, `missing property`, `type found`, `property found`, `missing validation`, `bug`, `documentation`} or a `Microsoft.*` RP label, remove the `Needs: Triage :mag:` label.
-- If you only applied `possible-duplicate` or no labels at all, leave `Needs: Triage :mag:` in place.
+- If you applied **any** of {`type issue`, `missing property`, `type found`, `property found`, `missing validation`, `bug`, `documentation`} or a `Microsoft.*` RP label, remove the `needs: triage` label.
+- If you only applied `possible-duplicate` or no labels at all, leave `needs: triage` in place.
 - Unassign yourself from the issue. Your job is done.
 
 ---
@@ -158,7 +158,7 @@ Routing labels (apply independently of category):
 
 Labels you may **remove** from the issue:
 
-- `Needs: Triage :mag:` (only at the end, per Step 6)
+- `needs: triage` (only at the end, per Step 6)
 
 You may not create new labels. You may not apply any label not listed above.
 

@@ -71,7 +71,7 @@ jobs:
           ISSUE_URL=$(gh issue create \
             --title "Triage sweep — $TODAY" \
             --body "$BODY" \
-            --label "Needs: Triage :mag:")
+            --label "needs: triage")
           echo "Created tracking issue: $ISSUE_URL"
 
           ISSUE_NUMBER=$(basename "$ISSUE_URL")

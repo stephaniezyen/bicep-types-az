@@ -22,7 +22,7 @@ jobs:
           GH_REPO: ${{ github.repository }}
           ISSUE: ${{ github.event.issue.number }}
         run: |
-          gh issue edit "$ISSUE" --add-label "Needs: Triage :mag:" || true
+          gh issue edit "$ISSUE" --add-label "needs: triage" || true
 
       - name: Assign the issue to Copilot
         env:
