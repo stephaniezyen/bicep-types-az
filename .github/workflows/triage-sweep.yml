@@ -2,104 +2,30 @@ name: Triage sweep (manual)
 
 on:
   workflow_dispatch:
-    inputs:
-      note:
-        description: Optional note to include in the tracking issue body.
-        required: false
-        default: ""
 
 permissions:
   issues: write
+  models: read
   contents: read
 
 jobs:
-  create-tracking-issue:
+  sweep:
     runs-on: ubuntu-latest
     steps:
-      - name: Create tracking issue and assign Copilot
+      - uses: actions/checkout@v4
+        with:
+          sparse-checkout: |
+            .github/triage-playbook.md
+            .github/scripts
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Run sweep
         env:
-          # Copilot agent assignment requires a user token (PAT) — the default
-          # GITHUB_TOKEN (App installation token) is rejected by GitHub with
-          # "Assigning agents is not supported with GitHub App installation tokens."
-          # Create a fine-grained PAT with Issues: read/write on this repo and
-          # save it as a repo secret named COPILOT_TRIAGE_PAT.
-          GH_TOKEN: ${{ secrets.COPILOT_TRIAGE_PAT }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           GH_REPO: ${{ github.repository }}
-          OWNER: ${{ github.repository_owner }}
-          REPO_NAME: ${{ github.event.repository.name }}
-          NOTE: ${{ inputs.note }}
-        run: |
-          if [ -z "$GH_TOKEN" ]; then
-            echo "::error::COPILOT_TRIAGE_PAT secret is not set. Create a fine-grained PAT with Issues: read/write and add it as a repo secret."
-            exit 1
-          fi
-          set -euo pipefail
-          TODAY=$(date -u +%Y-%m-%d)
-
-          BODY=$(cat <<EOF
-          @copilot run a full triage sweep over this repository per \`.github/triage-playbook.md\`.
-
-          ## Scope
-
-          1. List every currently **open** issue in this repo (exclude pull requests and this tracking issue).
-          2. **Skip** any issue whose body or any prior comment contains the marker \`<!-- copilot-triage:v1 -->\`. Those have already been triaged.
-          3. **Skip** any issue that already has at least one of these labels applied:
-             \`type issue\`, \`missing property\`, \`missing validation\`, \`type found\`, \`property found\`, \`bug\`, \`documentation\`, \`possible-duplicate\`, or any \`Microsoft.*\` resource provider label. Those have either been triaged previously or hand-labeled.
-          4. For each remaining open issue, run **Steps 1–4 and Step 6** of the playbook (label changes and, when required, a single comment). **Do not** run Step 5 (duplicate detection) during a sweep — duplicates are only flagged during the per-issue (issue-opened) workflow to keep noise down.
-
-          ## Output
-
-          When you are done, edit the description of **this** tracking issue to add a summary table at the bottom with one row per issue you touched:
-
-          | Issue | Resource Type | Issue Type | Labels added | Labels removed | Comment posted? |
-          | ----- | ------------- | ---------- | ------------ | -------------- | --------------- |
-
-          Then close this tracking issue.
-
-          ## Hard rules
-
-          - Do not modify any file in the repository.
-          - Do not open a pull request.
-          - Do not apply labels that are not on the allow-list in the playbook.
-          - Do not post more than one comment per triaged issue.
-          - Do not close any issue you triage. (You may close **this** tracking issue when done.)
-
-          ${NOTE:+## Operator note$'\n'$NOTE}
-          EOF
-          )
-
-          ISSUE_URL=$(gh issue create \
-            --title "Triage sweep — $TODAY" \
-            --body "$BODY" \
-            --label "needs: triage")
-          echo "Created tracking issue: $ISSUE_URL"
-
-          ISSUE_NUMBER=$(basename "$ISSUE_URL")
-
-          BOT_ID=$(gh api graphql -f query='
-            query($owner:String!,$repo:String!) {
-              repository(owner:$owner, name:$repo) {
-                suggestedActors(capabilities:[CAN_BE_ASSIGNED], first: 100) {
-                  nodes { __typename ... on Bot { id login } ... on User { id login } }
-                }
-              }
-            }' -F owner="$OWNER" -F repo="$REPO_NAME" \
-            --jq '.data.repository.suggestedActors.nodes[] | select(.login=="copilot-swe-agent" or .login=="Copilot") | .id' | head -n1)
-
-          if [ -z "$BOT_ID" ]; then
-            echo "::error::Could not find the Copilot coding agent actor for this repo. Is the agent enabled?"
-            exit 1
-          fi
-
-          ISSUE_ID=$(gh api graphql -f query='
-            query($owner:String!,$repo:String!,$num:Int!) {
-              repository(owner:$owner, name:$repo) { issue(number:$num) { id } }
-            }' -F owner="$OWNER" -F repo="$REPO_NAME" -F num:="$ISSUE_NUMBER" \
-            --jq '.data.repository.issue.id')
-
-          gh api graphql -f query='
-            mutation($assignable:ID!,$actor:ID!) {
-              replaceActorsForAssignable(input:{assignableId:$assignable, actorIds:[$actor]}) {
-                assignable { ... on Issue { number } }
-              }
-            }' -F assignable="$ISSUE_ID" -F actor="$BOT_ID"
+          MODEL: openai/gpt-4o-mini
+        run: node .github/scripts/triage.mjs --mode=sweep
