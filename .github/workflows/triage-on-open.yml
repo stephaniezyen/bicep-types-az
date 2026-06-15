@@ -26,12 +26,21 @@ jobs:
 
       - name: Assign the issue to Copilot
         env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # Copilot agent assignment requires a user token (PAT) — the default
+          # GITHUB_TOKEN (App installation token) is rejected by GitHub with
+          # "Assigning agents is not supported with GitHub App installation tokens."
+          # Create a fine-grained PAT with Issues: read/write on this repo and
+          # save it as a repo secret named COPILOT_TRIAGE_PAT.
+          GH_TOKEN: ${{ secrets.COPILOT_TRIAGE_PAT }}
           GH_REPO: ${{ github.repository }}
           ISSUE_NUMBER: ${{ github.event.issue.number }}
           OWNER: ${{ github.repository_owner }}
           REPO_NAME: ${{ github.event.repository.name }}
         run: |
+          if [ -z "$GH_TOKEN" ]; then
+            echo "::error::COPILOT_TRIAGE_PAT secret is not set. Create a fine-grained PAT with Issues: read/write and add it as a repo secret."
+            exit 1
+          fi
           # Look up the Copilot Bot actor and the issue's node id, then assign.
           # The Copilot coding agent is a Bot, so we use replaceActorsForAssignable.
           BOT_ID=$(gh api graphql -f query='
