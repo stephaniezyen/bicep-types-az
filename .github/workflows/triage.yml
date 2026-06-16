@@ -21,11 +21,9 @@ jobs:
       - uses: actions/github-script@v7
         with:
           script: |
-            // --- KEEP IN SYNC WITH triage-tests/classify.mjs ---
-            const fs = require('fs');
-            const MARKER = '<!-- auto-triage-bot:v2 -->';
+            const MARKER = '<!-- auto-triage-bot:v3 -->';
             const DOCS_BASE = 'https://learn.microsoft.com/en-us/azure/templates';
-            const UA = 'bicep-types-az-triage-bot/2.0';
+            const UA = 'bicep-types-az-triage-bot/3.0';
 
             const RP_REGEX = /\bMicrosoft\.[A-Za-z][A-Za-z0-9]*/gi;
             const TYPE_REGEX = /\bMicrosoft\.[A-Za-z][A-Za-z0-9]*(?:\/[A-Za-z][A-Za-z0-9]*)+/gi;
@@ -55,6 +53,18 @@ jobs:
               /\bexpose\s+[`'"]?([A-Za-z_][\w.-]*)[`'"]?\s+(?:propert|field|attribute)/i,
             ];
 
+            // Language indicating "the type itself is wrong / unavailable / does not exist".
+            // Intentionally separate from missing-property language.
+            const TYPE_ISSUE_REGEXES = [
+              /\btype\s+(?:is\s+)?(?:unavailable|not\s+available|missing|not\s+found)/i,
+              /\btype\s+does(?:\s+not|n['']?t)\s+exist/i,
+              /\bno\s+such\s+resource\s+type\b/i,
+              /\bunknown\s+resource\s+type\b/i,
+              /\bBCP081\b/i,
+              /\bResource\s+type\s+[^\n.]{0,80}\s+does\s+not\s+have\s+types\s+available\b/i,
+              /\btype\s+(?:definition\s+)?is\s+(?:wrong|incorrect|inaccurate)/i,
+            ];
+
             function normalizeNs(raw) {
               const suffix = raw.slice('Microsoft.'.length);
               const uniform = suffix === suffix.toLowerCase() || suffix === suffix.toUpperCase();
@@ -62,6 +72,14 @@ jobs:
                 ? suffix[0].toUpperCase() + suffix.slice(1).toLowerCase()
                 : suffix;
               return 'Microsoft.' + norm;
+            }
+
+            function extractMissingProperty(text) {
+              for (const regex of PROPERTY_NAME_REGEXES) {
+                const match = regex.exec(text);
+                if (match?.[1]) return match[1];
+              }
+              return null;
             }
 
             function classify(text) {
@@ -79,44 +97,39 @@ jobs:
               return {
                 rps: [...rpMap.values()],
                 types: [...typeMap.values()],
-                typeIssue: MISSING_PROPERTY_REGEXES.some(r => r.test(text)),
-                missingProperty: extractMissingProperty(text),
+                hasMissingPropertyLanguage: MISSING_PROPERTY_REGEXES.some(r => r.test(text)),
+                hasTypeIssueLanguage: TYPE_ISSUE_REGEXES.some(r => r.test(text)),
+                propertyName: extractMissingProperty(text),
               };
             }
 
-            function extractMissingProperty(text) {
-              for (const regex of PROPERTY_NAME_REGEXES) {
-                const match = regex.exec(text);
-                if (match?.[1]) return match[1];
-              }
-
-              return null;
-            }
-
-            async function validateDocsPath(path) {
-              const url = `${DOCS_BASE}/${path.toLowerCase()}`;
+            // Fetch the full docs page text for property-name verification.
+            async function fetchDocsText(type) {
+              const url = `${DOCS_BASE}/${type.toLowerCase()}`;
               try {
-                let res = await fetch(url, {
-                  method: 'HEAD', redirect: 'follow', headers: { 'User-Agent': UA },
-                });
-                if (res.status === 405) {
-                  res = await fetch(url, {
-                    method: 'GET', redirect: 'follow', headers: { 'User-Agent': UA },
-                  });
-                }
-                return { valid: res.ok, status: res.status, url };
+                const res = await fetch(url, { redirect: 'follow', headers: { 'User-Agent': UA } });
+                if (!res.ok) return { url, status: res.status, text: null };
+                const html = await res.text();
+                const text = html
+                  .replace(/<script[\s\S]*?<\/script>/gi, ' ')
+                  .replace(/<style[\s\S]*?<\/style>/gi, ' ')
+                  .replace(/<[^>]+>/g, ' ')
+                  .replace(/&nbsp;/g, ' ').replace(/&amp;/g, '&')
+                  .replace(/&lt;/g, '<').replace(/&gt;/g, '>')
+                  .replace(/&quot;/g, '"').replace(/&#39;/g, "'")
+                  .replace(/\s+/g, ' ')
+                  .trim();
+                return { url, status: res.status, text };
               } catch (e) {
-                return { valid: null, status: null, url, error: e.message };
+                return { url, status: null, text: null, error: e.message };
               }
             }
 
-            async function validateType(type) {
-              return validateDocsPath(type);
-            }
-
-            function validateNamespace(ns) {
-              const path = `generated/types/${ns.toLowerCase()}`;
-              return { valid: fs.existsSync(path), status: null, url: path };
+            // Case-insensitive whole-word search.
+            function pageHasWord(pageText, word) {
+              if (!pageText || !word) return false;
+              const esc = word.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+              return new RegExp(`(?<![A-Za-z0-9_])${esc}(?![A-Za-z0-9_])`, 'i').test(pageText);
             }
 
             function hashColor(s) {
@@ -125,7 +138,7 @@ jobs:
               return h.toString(16).padStart(6, '0');
             }
 
-            async function ensureLabel(label) {
+            async function ensureLabel(label, description) {
               try {
                 await github.rest.issues.getLabel({ owner, repo, name: label });
               } catch (e) {
@@ -134,11 +147,7 @@ jobs:
                   await github.rest.issues.createLabel({
                     owner, repo, name: label,
                     color: hashColor(label),
-                    description: label === 'type issue'
-                      ? 'Issue references a specific ARM resource type'
-                      : label === 'missing property'
-                        ? 'Issue reports a missing property on an ARM resource type'
-                        : `Issues related to the ${label} resource provider`,
+                    description: description || `Auto-triage label: ${label}`,
                   });
                   core.info(`Created label ${label}`);
                 } catch (createErr) {
@@ -159,31 +168,14 @@ jobs:
             }
 
             const text = `${issue.title || ''}\n\n${issue.body || ''}`;
-            const { rps, types, typeIssue, missingProperty } = classify(text);
-            core.info(`Extracted rps=[${rps.join(', ')}] types=[${types.join(', ')}] typeIssue=${typeIssue} missingProperty=${missingProperty || ''}`);
+            const cls = classify(text);
+            core.info(
+              `Extracted rps=[${cls.rps.join(', ')}] types=[${cls.types.join(', ')}] ` +
+              `typeIssue=${cls.hasTypeIssueLanguage} missingProp=${cls.hasMissingPropertyLanguage} ` +
+              `propertyName=${cls.propertyName || ''}`
+            );
 
-            // Validate namespaces before labeling so URL false positives like Microsoft.Com are ignored.
-            const validatedRps = [];
-            for (const rp of rps) {
-              const v = await validateNamespace(rp);
-              core.info(`Validate ${rp}: valid=${v.valid} status=${v.status}`);
-              if (v.valid === true) validatedRps.push(rp);
-            }
-
-            if (validatedRps.length === 0) {
-              core.info('No detected resource provider matched generated types. Leaving untriaged.');
-              return;
-            }
-
-            // Validate every type against learn.microsoft.com. Drop 404s and network errors.
-            const validatedTypes = [];
-            for (const t of types) {
-              const v = await validateType(t);
-              core.info(`Validate ${t}: valid=${v.valid} status=${v.status}`);
-              if (v.valid === true) validatedTypes.push(t);
-            }
-
-            // Idempotency: if we've already triaged this issue, don't re-comment or re-close.
+            // Idempotency: if we've already triaged this issue, don't re-comment.
             const priorComments = await github.paginate(github.rest.issues.listComments, {
               owner, repo, issue_number: num, per_page: 100,
             });
@@ -191,92 +183,158 @@ jobs:
               c.user && c.user.type === 'Bot' && (c.body || '').includes(MARKER)
             );
 
-            // --- Apply labels (auto) ---
-            const labelsToApply = [...validatedRps];
-            if (validatedTypes.length > 0) labelsToApply.push('type issue');
-            if (typeIssue && validatedTypes.length > 0) labelsToApply.push('missing property');
+            // --- Property verification against docs (only when we have a named property + a type) ---
+            let propertyVerification = null; // { found: bool, url, type, property }
+            if (cls.hasMissingPropertyLanguage && cls.propertyName && cls.types.length > 0) {
+              const t = cls.types[0];
+              const docs = await fetchDocsText(t);
+              core.info(`Docs fetch for ${t}: status=${docs.status} length=${docs.text ? docs.text.length : 0}`);
+              if (docs.text) {
+                const found = pageHasWord(docs.text, cls.propertyName);
+                propertyVerification = { found, url: docs.url, type: t, property: cls.propertyName };
+                core.info(`Property '${cls.propertyName}' found in docs for ${t}: ${found}`);
+              }
+            }
 
-            for (const label of labelsToApply) {
+            // --- Compose labels ---
+            const labelsToApply = new Set(cls.rps);
+
+            if (cls.hasTypeIssueLanguage) {
+              labelsToApply.add('type issue');
+            }
+
+            if (cls.hasMissingPropertyLanguage) {
+              if (propertyVerification && propertyVerification.found) {
+                labelsToApply.add('property found');
+              } else {
+                labelsToApply.add('missing property');
+              }
+            }
+
+            // --- Duplicate detection ---
+            // Rule: same exact property name (when extractable), OR same exact type for a type-issue,
+            // matches an older open issue with the same signal. We only LABEL + COMMENT, never close.
+            let duplicateMatches = []; // array of { number, createdAt, reason }
+            if (!alreadyTriaged && (cls.propertyName || (cls.hasTypeIssueLanguage && cls.types.length > 0))) {
+              const allOpen = await github.paginate(github.rest.issues.listForRepo, {
+                owner, repo, state: 'open', per_page: 100,
+              });
+              for (const other of allOpen) {
+                if (other.number === num) continue;
+                if (other.pull_request) continue;
+                if (new Date(other.created_at) >= new Date(issue.created_at)) continue;
+                const otherText = `${other.title || ''}\n\n${other.body || ''}`;
+                const otherCls = classify(otherText);
+                if (cls.propertyName && otherCls.propertyName &&
+                    otherCls.propertyName.toLowerCase() === cls.propertyName.toLowerCase()) {
+                  duplicateMatches.push({
+                    number: other.number,
+                    createdAt: other.created_at,
+                    reason: `same property \`${cls.propertyName}\``,
+                  });
+                  continue;
+                }
+                if (cls.hasTypeIssueLanguage && otherCls.hasTypeIssueLanguage) {
+                  const otherTypesLower = new Set(otherCls.types.map(t => t.toLowerCase()));
+                  const sharedType = cls.types.find(t => otherTypesLower.has(t.toLowerCase()));
+                  if (sharedType) {
+                    duplicateMatches.push({
+                      number: other.number,
+                      createdAt: other.created_at,
+                      reason: `same type \`${sharedType}\` with type-issue language`,
+                    });
+                  }
+                }
+              }
+              duplicateMatches.sort((a, b) => new Date(a.createdAt) - new Date(b.createdAt));
+            }
+
+            if (duplicateMatches.length > 0) {
+              labelsToApply.add('possible-duplicate');
+            }
+
+            // --- Apply labels ---
+            const labelArr = [...labelsToApply];
+            for (const label of labelArr) {
               await ensureLabel(label);
             }
-            await github.rest.issues.addLabels({
-              owner, repo, issue_number: num, labels: labelsToApply,
-            });
-            core.info(`Applied labels: ${labelsToApply.join(', ')}`);
-
-            if (validatedTypes.length === 0) {
-              core.info('No validated type detected; resource provider labels applied only.');
-              return;
+            if (labelArr.length > 0) {
+              await github.rest.issues.addLabels({
+                owner, repo, issue_number: num, labels: labelArr,
+              });
+              core.info(`Applied labels: ${labelArr.join(', ')}`);
+            } else {
+              core.info('No labels to apply.');
             }
 
-            if (typeIssue) {
-              const propertyName = missingProperty || 'unknown';
-              const normalizedTitle = `[${validatedTypes[0]}]: ${propertyName} property missing`;
+            // --- Title normalization for confirmed missing-property issues ---
+            if (cls.hasMissingPropertyLanguage && cls.propertyName && cls.types.length > 0 &&
+                !(propertyVerification && propertyVerification.found)) {
+              const normalizedTitle = `[${cls.types[0]}]: ${cls.propertyName} property missing`;
               if (issue.title !== normalizedTitle) {
                 await github.rest.issues.update({
-                  owner, repo, issue_number: num,
-                  title: normalizedTitle,
+                  owner, repo, issue_number: num, title: normalizedTitle,
                 });
                 core.info(`Renamed issue to: ${normalizedTitle}`);
               }
             }
 
-            // --- Duplicate detection on validated types ---
-            let duplicateOf = null;
-            if (!alreadyTriaged) {
-              outer: for (const type of validatedTypes) {
-                const q = `repo:${owner}/${repo} is:issue is:open "${type}"`;
-                const { data } = await github.rest.search.issuesAndPullRequests({ q, per_page: 30 });
-                const candidates = [];
-                for (const item of data.items) {
-                  if (item.number === num) continue;
-                  if (item.pull_request) continue;
-                  if (new Date(item.created_at) >= new Date(issue.created_at)) continue;
-                  const full = await github.rest.issues.get({
-                    owner, repo, issue_number: item.number,
-                  });
-                  const haystack = `${full.data.title}\n${full.data.body || ''}`.toLowerCase();
-                  if (haystack.includes(type.toLowerCase())) candidates.push(full.data);
-                }
-                if (candidates.length === 0) continue;
-                candidates.sort((a, b) => new Date(a.created_at) - new Date(b.created_at));
-                duplicateOf = { canonical: candidates[0], type };
-                break outer;
-              }
-            }
-
-            // --- Close as duplicate OR post acknowledgement ---
-            if (duplicateOf) {
-              const { canonical, type } = duplicateOf;
-              const body =
-                `${MARKER}\n` +
-                `This issue references the same type \`${type}\` as #${canonical.number} ` +
-                `(opened ${canonical.created_at.slice(0, 10)}). ` +
-                `Closing as a duplicate — please continue the discussion there.\n\n` +
-                `_Auto-triaged. If this is wrong, reopen and a maintainer will review._`;
-              await github.rest.issues.createComment({ owner, repo, issue_number: num, body });
-              await github.rest.issues.update({
-                owner, repo, issue_number: num,
-                state: 'closed', state_reason: 'not_planned',
-              });
-              core.notice(`Closed #${num} as duplicate of #${canonical.number} (type: ${type})`);
+            // --- Comments ---
+            if (alreadyTriaged) {
+              core.info('Already triaged previously; skipping comments.');
               return;
             }
 
-            if (!alreadyTriaged && action === 'opened') {
-              const lines = [MARKER, 'Thanks for the report! Auto-triage detected:', ''];
-              lines.push(`- **Resource provider${validatedRps.length > 1 ? 's' : ''}:** ` +
-                validatedRps.map(r => `\`${r}\``).join(', '));
-              if (validatedTypes.length > 0) {
-                lines.push(`- **Type${validatedTypes.length > 1 ? 's' : ''} (verified in docs):** ` +
-                  validatedTypes.map(t => `\`${t}\``).join(', '));
+            const commentBlocks = [];
+
+            // "Property found in docs" comment (contradiction).
+            if (propertyVerification && propertyVerification.found) {
+              commentBlocks.push(
+                `I checked the Azure template docs for **\`${propertyVerification.type}\`** and found ` +
+                `the property \`${propertyVerification.property}\` documented:\n\n` +
+                `${propertyVerification.url}\n\n` +
+                `Could you double-check spelling and the API version you're targeting? ` +
+                `If the property is working for you, feel free to close.`
+              );
+            }
+
+            // Possible-duplicate comment (don't close — just flag for maintainer review).
+            if (duplicateMatches.length > 0) {
+              const list = duplicateMatches.slice(0, 5)
+                .map(d => `- #${d.number} (${d.reason}, opened ${d.createdAt.slice(0, 10)})`)
+                .join('\n');
+              commentBlocks.push(
+                `🤔 This looks like it may duplicate:\n\n${list}\n\n` +
+                `Labeled \`possible-duplicate\` for maintainer review — not auto-closing.`
+              );
+            }
+
+            // Acknowledgement comment on opened (only if no other comment was posted).
+            if (commentBlocks.length === 0 && action === 'opened') {
+              const lines = ['Thanks for the report! Auto-triage detected:', ''];
+              if (cls.rps.length > 0) {
+                lines.push(`- **Resource provider${cls.rps.length > 1 ? 's' : ''}:** ` +
+                  cls.rps.map(r => `\`${r}\``).join(', '));
               }
-              if (typeIssue && validatedTypes.length > 0) {
-                lines.push(`- Detected language about a missing property — labeled \`missing property\` and normalized the issue title.`);
+              if (cls.types.length > 0) {
+                lines.push(`- **Type${cls.types.length > 1 ? 's' : ''}:** ` +
+                  cls.types.map(t => `\`${t}\``).join(', '));
               }
-              lines.push('', 'A maintainer will follow up.');
-              await github.rest.issues.createComment({
-                owner, repo, issue_number: num, body: lines.join('\n'),
-              });
-              core.info('Posted acknowledgement comment.');
+              if (cls.hasTypeIssueLanguage) {
+                lines.push(`- Labeled \`type issue\` based on language about the type being wrong or unavailable.`);
+              }
+              if (cls.hasMissingPropertyLanguage) {
+                lines.push(`- Labeled \`missing property\`` +
+                  (cls.propertyName ? ` (extracted property: \`${cls.propertyName}\`)` : '') + `.`);
+              }
+              if (lines.length > 2) {
+                lines.push('', 'A maintainer will follow up.');
+                commentBlocks.push(lines.join('\n'));
+              }
+            }
+
+            if (commentBlocks.length > 0) {
+              const body = `${MARKER}\n` + commentBlocks.join('\n\n---\n\n');
+              await github.rest.issues.createComment({ owner, repo, issue_number: num, body });
+              core.info(`Posted ${commentBlocks.length} comment block(s).`);
             }
