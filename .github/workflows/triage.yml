@@ -51,6 +51,11 @@ jobs:
               /\b(?:propert(?:y|ies)|field|attribute)\s+[`'"]?([A-Za-z_][\w.-]*)[`'"]?\s+(?:does(?:\s+not|n['']?t)\s+exist|is\s+not\s+(?:defined|exposed|present|available|listed))/i,
               /\badd\s+[`'"]?([A-Za-z_][\w.-]*)[`'"]?\s+(?:propert(?:y|ies)|field|attribute)\b/i,
               /\bexpose\s+[`'"]?([A-Za-z_][\w.-]*)[`'"]?\s+(?:propert|field|attribute)/i,
+              // Type-issue phrasings that reference a specific property.
+              /\btype\s+(?:definition\s+)?(?:for|of)\s+[`'"]([A-Za-z_][\w.-]*)[`'"]/i,
+              /[`'"]([A-Za-z_][\w.-]*)[`'"]\s+(?:propert(?:y|ies)|field|attribute)\s+(?:has|have)\s+(?:the\s+)?(?:wrong|incorrect|inaccurate)\s+type/i,
+              /[`'"]([A-Za-z_][\w.-]*)[`'"]\s+(?:propert(?:y|ies)|field|attribute)\s+(?:on|of|in)\s+[`'"]?Microsoft\./i,
+              /\btype\s+(?:definition\s+)?(?:for|of)\s+(?:the\s+)?[`'"]?([A-Za-z_][\w.-]*)[`'"]?\s+(?:propert(?:y|ies)|field|attribute)/i,
             ];
 
             // Fallback: matches "NAME property is missing" (name precedes "property is/are missing").
@@ -74,6 +79,11 @@ jobs:
               /\bBCP081\b/i,
               /\bResource\s+type\s+[^\n.]{0,80}\s+does\s+not\s+have\s+types\s+available\b/i,
               /\btype\s+(?:definition\s+)?is\s+(?:wrong|incorrect|inaccurate)/i,
+              /\btype\s+(?:definition\s+)?(?:for|of)\s+[^\n.]{0,80}?\s+is\s+(?:wrong|incorrect|inaccurate)/i,
+              /\b(?:wrong|incorrect|inaccurate)\s+type\s+(?:for|on)\b/i,
+              /\b(?:doesn['']?t|does\s+not|don['']?t|do\s+not)\s+(?:accept|allow)\s+(?:string|int|integer|number|bool|boolean|array)/i,
+              /\bshould\s+(?:accept|allow)\s+(?:string|int|integer|number|bool|boolean|array)/i,
+              /\brejects?\s+(?:valid\s+)?(?:string|int|integer|number|bool|boolean|array|value)/i,
             ];
 
             // Language indicating a runtime/deployment bug (not a schema/type issue).
