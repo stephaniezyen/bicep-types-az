@@ -53,6 +53,17 @@ jobs:
               /\bexpose\s+[`'"]?([A-Za-z_][\w.-]*)[`'"]?\s+(?:propert|field|attribute)/i,
             ];
 
+            // Fallback: matches "NAME property is missing" (name precedes "property is/are missing").
+            // Stopword-filtered to avoid capturing articles/pronouns like "the property is missing".
+            const NAME_BEFORE_PROPERTY_REGEX = /\b([A-Za-z_][\w.-]*)\s+(?:propert(?:y|ies)|field|attribute)\s+(?:is|are)\s+missing\b/gi;
+            const PROPERTY_NAME_STOPWORDS = new Set([
+              'the','a','an','this','that','these','those','my','our','your','their','its','his','her',
+              'one','no','any','some','all','each','every','first','last','new','old','same','other','another',
+              'is','are','was','were','will','should','must','can','may','might','has','have','had','do','does','did',
+              'and','or','but','not','if','when','then','so','because','also','only','just','still','already',
+              'required','optional','important','expected','missing',
+            ]);
+
             // Language indicating "the type itself is wrong / unavailable / does not exist".
             // Intentionally separate from missing-property language.
             const TYPE_ISSUE_REGEXES = [
@@ -78,6 +89,15 @@ jobs:
               for (const regex of PROPERTY_NAME_REGEXES) {
                 const match = regex.exec(text);
                 if (match?.[1]) return match[1];
+              }
+              // Fallback: "NAME property is missing" with stopword filter.
+              let m;
+              NAME_BEFORE_PROPERTY_REGEX.lastIndex = 0;
+              while ((m = NAME_BEFORE_PROPERTY_REGEX.exec(text)) !== null) {
+                const candidate = m[1];
+                if (candidate && !PROPERTY_NAME_STOPWORDS.has(candidate.toLowerCase())) {
+                  return candidate;
+                }
               }
               return null;
             }
@@ -212,10 +232,15 @@ jobs:
             }
 
             // --- Duplicate detection ---
-            // Rule: same exact property name (when extractable), OR same exact type for a type-issue,
-            // matches an older open issue with the same signal. We only LABEL + COMMENT, never close.
+            // Rule: must share BOTH the same exact resource type AND the same property name
+            // (case-insensitive). For pure type-issue complaints with no extractable property,
+            // share the same exact resource type AND type-issue language. Only LABEL + COMMENT,
+            // never auto-close.
             let duplicateMatches = []; // array of { number, createdAt, reason }
-            if (!alreadyTriaged && (cls.propertyName || (cls.hasTypeIssueLanguage && cls.types.length > 0))) {
+            const currentTypesLower = new Set(cls.types.map(t => t.toLowerCase()));
+            const shouldCheckDupes = !alreadyTriaged && cls.types.length > 0 &&
+              (cls.propertyName || cls.hasTypeIssueLanguage);
+            if (shouldCheckDupes) {
               const allOpen = await github.paginate(github.rest.issues.listForRepo, {
                 owner, repo, state: 'open', per_page: 100,
               });
@@ -225,25 +250,23 @@ jobs:
                 if (new Date(other.created_at) >= new Date(issue.created_at)) continue;
                 const otherText = `${other.title || ''}\n\n${other.body || ''}`;
                 const otherCls = classify(otherText);
-                if (cls.propertyName && otherCls.propertyName &&
-                    otherCls.propertyName.toLowerCase() === cls.propertyName.toLowerCase()) {
-                  duplicateMatches.push({
-                    number: other.number,
-                    createdAt: other.created_at,
-                    reason: `same property \`${cls.propertyName}\``,
-                  });
-                  continue;
-                }
-                if (cls.hasTypeIssueLanguage && otherCls.hasTypeIssueLanguage) {
-                  const otherTypesLower = new Set(otherCls.types.map(t => t.toLowerCase()));
-                  const sharedType = cls.types.find(t => otherTypesLower.has(t.toLowerCase()));
-                  if (sharedType) {
+                const sharedType = otherCls.types.find(t => currentTypesLower.has(t.toLowerCase()));
+                if (!sharedType) continue;
+                if (cls.propertyName) {
+                  if (otherCls.propertyName &&
+                      otherCls.propertyName.toLowerCase() === cls.propertyName.toLowerCase()) {
                     duplicateMatches.push({
                       number: other.number,
                       createdAt: other.created_at,
-                      reason: `same type \`${sharedType}\` with type-issue language`,
+                      reason: `same type \`${sharedType}\` and same property \`${cls.propertyName}\``,
                     });
                   }
+                } else if (cls.hasTypeIssueLanguage && otherCls.hasTypeIssueLanguage && !otherCls.propertyName) {
+                  duplicateMatches.push({
+                    number: other.number,
+                    createdAt: other.created_at,
+                    reason: `same type \`${sharedType}\` with type-issue language`,
+                  });
                 }
               }
               duplicateMatches.sort((a, b) => new Date(a.createdAt) - new Date(b.createdAt));
