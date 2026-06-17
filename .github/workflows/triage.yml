@@ -79,11 +79,11 @@ jobs:
               /\bBCP081\b/i,
               /\bResource\s+type\s+[^\n.]{0,80}\s+does\s+not\s+have\s+types\s+available\b/i,
               /\btype\s+(?:definition\s+)?is\s+(?:wrong|incorrect|inaccurate)/i,
-              /\btype\s+(?:definition\s+)?(?:for|of)\s+[^\n.]{0,80}?\s+is\s+(?:wrong|incorrect|inaccurate)/i,
+              /\btype\s+(?:definition\s+)?(?:for|of)\b[^\n]{0,100}?\bis\s+(?:wrong|incorrect|inaccurate)/i,
               /\b(?:wrong|incorrect|inaccurate)\s+type\s+(?:for|on)\b/i,
-              /\b(?:doesn['']?t|does\s+not|don['']?t|do\s+not)\s+(?:accept|allow)\s+(?:string|int|integer|number|bool|boolean|array)/i,
-              /\bshould\s+(?:accept|allow)\s+(?:string|int|integer|number|bool|boolean|array)/i,
-              /\brejects?\s+(?:valid\s+)?(?:string|int|integer|number|bool|boolean|array|value)/i,
+              /\b(?:doesn['']?t|does\s+not|don['']?t|do\s+not)\s+(?:accept|allow)\b/i,
+              /\bshould\s+(?:accept|allow)\b/i,
+              /\brejects?\b[^\n]{0,40}?\b(?:string|int|integer|number|bool|boolean|array|value)\b/i,
             ];
 
             // Language indicating a runtime/deployment bug (not a schema/type issue).
