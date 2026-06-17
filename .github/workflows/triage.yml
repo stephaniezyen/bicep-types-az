@@ -76,6 +76,22 @@ jobs:
               /\btype\s+(?:definition\s+)?is\s+(?:wrong|incorrect|inaccurate)/i,
             ];
 
+            // Language indicating a runtime/deployment bug (not a schema/type issue).
+            const BUG_REGEXES = [
+              /\b(?:deployment|deploy|provisioning)\s+(?:fail|fails|failed|failing)\b/i,
+              /\bfail(?:s|ed|ing)?\s+to\s+(?:deploy|provision|create|update)\b/i,
+              /\bARM\s+(?:rejects?|errors?\s+on|throws|complains)\b/i,
+              /\b(?:error\s+message|error)\s+is\s+(?:unclear|confusing|unhelpful|misleading|cryptic)\b/i,
+              /\bconfusing\s+(?:error|message)\b/i,
+              /\b(?:I\s+)?(?:don['']?t|do\s+not|cannot|can['']?t)\s+understand\s+(?:this|the|that)?\s*error\b/i,
+              /\bhas\s+no\s+effect\s+on\s+(?:deployment|the\s+resource|the\s+deploy)\b/i,
+              /\bsetting\s+\S+\s+is\s+ignored\b/i,
+              /\bdoes(?:\s+not|n['']?t)\s+(?:change|affect|modify)\s+anything\b/i,
+              /\bunexpected(?:ly)?\s+(?:fails|behavior|behaviour)\b/i,
+              /\b(?:bug|defect)\s+in\s+(?:the\s+)?(?:resource\s+provider|RP|API|service)\b/i,
+              /\bintermittent(?:ly)?\s+(?:fail|fails|failing|breaks|errors)\b/i,
+            ];
+
             function normalizeNs(raw) {
               const suffix = raw.slice('Microsoft.'.length);
               const uniform = suffix === suffix.toLowerCase() || suffix === suffix.toUpperCase();
@@ -119,6 +135,7 @@ jobs:
                 types: [...typeMap.values()],
                 hasMissingPropertyLanguage: MISSING_PROPERTY_REGEXES.some(r => r.test(text)),
                 hasTypeIssueLanguage: TYPE_ISSUE_REGEXES.some(r => r.test(text)),
+                hasBugLanguage: BUG_REGEXES.some(r => r.test(text)),
                 propertyName: extractMissingProperty(text),
               };
             }
@@ -192,7 +209,7 @@ jobs:
             core.info(
               `Extracted rps=[${cls.rps.join(', ')}] types=[${cls.types.join(', ')}] ` +
               `typeIssue=${cls.hasTypeIssueLanguage} missingProp=${cls.hasMissingPropertyLanguage} ` +
-              `propertyName=${cls.propertyName || ''}`
+              `bug=${cls.hasBugLanguage} propertyName=${cls.propertyName || ''}`
             );
 
             // Idempotency: if we've already triaged this issue, don't re-comment.
@@ -221,6 +238,10 @@ jobs:
 
             if (cls.hasTypeIssueLanguage) {
               labelsToApply.add('type issue');
+            }
+
+            if (cls.hasBugLanguage) {
+              labelsToApply.add('bug');
             }
 
             if (cls.hasMissingPropertyLanguage) {
@@ -345,6 +366,9 @@ jobs:
               }
               if (cls.hasTypeIssueLanguage) {
                 lines.push(`- Labeled \`type issue\` based on language about the type being wrong or unavailable.`);
+              }
+              if (cls.hasBugLanguage) {
+                lines.push(`- Labeled \`bug\` based on language about a deployment failure or unexpected runtime behavior.`);
               }
               if (cls.hasMissingPropertyLanguage) {
                 lines.push(`- Labeled \`missing property\`` +
