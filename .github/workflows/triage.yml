@@ -254,13 +254,12 @@ jobs:
 
             // --- Duplicate detection ---
             // Rule: must share BOTH the same exact resource type AND the same property name
-            // (case-insensitive). For pure type-issue complaints with no extractable property,
-            // share the same exact resource type AND type-issue language. Only LABEL + COMMENT,
-            // never auto-close.
+            // (case-insensitive). Without an extractable property name, we cannot identify a
+            // duplicate — the bot will instead ask the reporter to specify which property.
+            // Only LABEL + COMMENT, never auto-close.
             let duplicateMatches = []; // array of { number, createdAt, reason }
             const currentTypesLower = new Set(cls.types.map(t => t.toLowerCase()));
-            const shouldCheckDupes = !alreadyTriaged && cls.types.length > 0 &&
-              (cls.propertyName || cls.hasTypeIssueLanguage);
+            const shouldCheckDupes = !alreadyTriaged && cls.types.length > 0 && cls.propertyName;
             if (shouldCheckDupes) {
               const allOpen = await github.paginate(github.rest.issues.listForRepo, {
                 owner, repo, state: 'open', per_page: 100,
@@ -273,25 +272,23 @@ jobs:
                 const otherCls = classify(otherText);
                 const sharedType = otherCls.types.find(t => currentTypesLower.has(t.toLowerCase()));
                 if (!sharedType) continue;
-                if (cls.propertyName) {
-                  if (otherCls.propertyName &&
-                      otherCls.propertyName.toLowerCase() === cls.propertyName.toLowerCase()) {
-                    duplicateMatches.push({
-                      number: other.number,
-                      createdAt: other.created_at,
-                      reason: `same type \`${sharedType}\` and same property \`${cls.propertyName}\``,
-                    });
-                  }
-                } else if (cls.hasTypeIssueLanguage && otherCls.hasTypeIssueLanguage && !otherCls.propertyName) {
+                if (otherCls.propertyName &&
+                    otherCls.propertyName.toLowerCase() === cls.propertyName.toLowerCase()) {
                   duplicateMatches.push({
                     number: other.number,
                     createdAt: other.created_at,
-                    reason: `same type \`${sharedType}\` with type-issue language`,
+                    reason: `same type \`${sharedType}\` and same property \`${cls.propertyName}\``,
                   });
                 }
               }
               duplicateMatches.sort((a, b) => new Date(a.createdAt) - new Date(b.createdAt));
             }
+
+            // If we have type-issue or missing-property language but no extractable property
+            // name, we can't dedupe — ask the reporter to specify which property.
+            const needsPropertyClarification =
+              !cls.propertyName &&
+              (cls.hasTypeIssueLanguage || cls.hasMissingPropertyLanguage);
 
             if (duplicateMatches.length > 0) {
               labelsToApply.add('possible-duplicate');
@@ -350,6 +347,18 @@ jobs:
               commentBlocks.push(
                 `🤔 This looks like it may duplicate:\n\n${list}\n\n` +
                 `Labeled \`possible-duplicate\` for maintainer review — not auto-closing.`
+              );
+            }
+
+            // Clarification request when type-issue / missing-property language is present
+            // but no specific property name was extracted.
+            if (needsPropertyClarification) {
+              const kind = cls.hasMissingPropertyLanguage ? 'missing-property' : 'type';
+              commentBlocks.push(
+                `Could you clarify **which specific property** is affected? ` +
+                `I detected ${kind}-issue language but couldn't identify a property name from the title or body, ` +
+                `so I can't check the docs or look for duplicates without more detail. ` +
+                `Including the property name in backticks (e.g. \`\`\`propertyName\`\`\`) helps the bot pick it up.`
               );
             }
 
