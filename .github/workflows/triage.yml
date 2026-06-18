@@ -25,8 +25,11 @@ jobs:
             const DOCS_BASE = 'https://learn.microsoft.com/en-us/azure/templates';
             const UA = 'bicep-types-az-triage-bot/3.0';
 
-            const RP_REGEX = /\bMicrosoft\.[A-Za-z][A-Za-z0-9]*/gi;
-            const TYPE_REGEX = /\bMicrosoft\.[A-Za-z][A-Za-z0-9]*(?:\/[A-Za-z][A-Za-z0-9]*)+/gi;
+            // PascalCase Microsoft.<Namespace> — case-sensitive to avoid matching
+            // domain names like `learn.microsoft.com`. The namespace segment must
+            // start with an uppercase letter and contain at least 3 chars total.
+            const RP_REGEX = /(?<![.\/\w])Microsoft\.[A-Z][A-Za-z0-9]{2,}/g;
+            const TYPE_REGEX = /(?<![.\/\w])Microsoft\.[A-Z][A-Za-z0-9]{2,}(?:\/[A-Za-z][A-Za-z0-9]*)+/g;
 
             const MISSING_PROPERTY_REGEXES = [
               /\bmissing\b[^.\n]{0,60}\b(propert|field|attribute)/i,
@@ -216,8 +219,27 @@ jobs:
 
             const text = `${issue.title || ''}\n\n${issue.body || ''}`;
             const cls = classify(text);
+            // Determine the *primary* resource provider(s) for labeling:
+            //   1. Any `Microsoft.X/y` types mentioned in the title → use their RPs.
+            //   2. Else any `Microsoft.X` RPs mentioned in the title → use those.
+            //   3. Else any `Microsoft.X/y` types in the body → use their RPs.
+            //   4. Else fall back to RPs found anywhere in the body.
+            // This prevents labeling every RP that happens to be name-dropped in
+            // a body that's really about one specific resource.
+            const titleCls = classify(issue.title || '');
+            let primaryRps;
+            if (titleCls.types.length > 0) {
+              primaryRps = [...new Set(titleCls.types.map(t => t.split('/')[0]))];
+            } else if (titleCls.rps.length > 0) {
+              primaryRps = titleCls.rps;
+            } else if (cls.types.length > 0) {
+              primaryRps = [...new Set(cls.types.map(t => t.split('/')[0]))];
+            } else {
+              primaryRps = cls.rps;
+            }
             core.info(
               `Extracted rps=[${cls.rps.join(', ')}] types=[${cls.types.join(', ')}] ` +
+              `primaryRps=[${primaryRps.join(', ')}] ` +
               `typeIssue=${cls.hasTypeIssueLanguage} missingProp=${cls.hasMissingPropertyLanguage} ` +
               `bug=${cls.hasBugLanguage} propertyName=${cls.propertyName || ''}`
             );
@@ -244,7 +266,7 @@ jobs:
             }
 
             // --- Compose labels ---
-            const labelsToApply = new Set(cls.rps);
+            const labelsToApply = new Set(primaryRps);
 
             if (cls.hasTypeIssueLanguage) {
               labelsToApply.add('type issue');
@@ -375,13 +397,14 @@ jobs:
             // Acknowledgement comment on opened (only if no other comment was posted).
             if (commentBlocks.length === 0 && action === 'opened') {
               const lines = ['Thanks for the report! Auto-triage detected:', ''];
-              if (cls.rps.length > 0) {
-                lines.push(`- **Resource provider${cls.rps.length > 1 ? 's' : ''}:** ` +
-                  cls.rps.map(r => `\`${r}\``).join(', '));
+              if (primaryRps.length > 0) {
+                lines.push(`- **Resource provider${primaryRps.length > 1 ? 's' : ''}:** ` +
+                  primaryRps.map(r => `\`${r}\``).join(', '));
               }
-              if (cls.types.length > 0) {
-                lines.push(`- **Type${cls.types.length > 1 ? 's' : ''}:** ` +
-                  cls.types.map(t => `\`${t}\``).join(', '));
+              const primaryTypes = (titleCls.types.length > 0 ? titleCls.types : cls.types);
+              if (primaryTypes.length > 0) {
+                lines.push(`- **Type${primaryTypes.length > 1 ? 's' : ''}:** ` +
+                  primaryTypes.map(t => `\`${t}\``).join(', '));
               }
               if (cls.hasTypeIssueLanguage) {
                 lines.push(`- Labeled \`type issue\` based on language about the type being wrong or unavailable.`);
