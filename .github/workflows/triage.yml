@@ -42,6 +42,8 @@ jobs:
               /\badd\s+[`'\w.\s]{0,40}(propert(y|ies)|field|attribute)\b/i,
               /\bexpose\s+[`'\w.\s]{0,40}(propert|field|attribute)/i,
               /\bnot\s+exposed\s+in\s+the\s+(type|schema|api)/i,
+              /[`'"][A-Za-z_][\w.-]*[`'"]\s+is\s+not\s+allowed\b/i,
+              /[`'"][A-Za-z_][\w.-]*[`'"]\s+is\s+(?:not\s+(?:permitted|recognized|supported))\b/i,
             ];
 
             const PROPERTY_NAME_REGEXES = [
@@ -59,6 +61,12 @@ jobs:
               /[`'"]([A-Za-z_][\w.-]*)[`'"]\s+(?:propert(?:y|ies)|field|attribute)\s+(?:has|have)\s+(?:the\s+)?(?:wrong|incorrect|inaccurate)\s+type/i,
               /[`'"]([A-Za-z_][\w.-]*)[`'"]\s+(?:propert(?:y|ies)|field|attribute)\s+(?:on|of|in)\s+[`'"]?Microsoft\./i,
               /\btype\s+(?:definition\s+)?(?:for|of)\s+(?:the\s+)?[`'"]?([A-Za-z_][\w.-]*)[`'"]?\s+(?:propert(?:y|ies)|field|attribute)/i,
+              // Inverted/template phrasings: "X is not allowed", "X is rejected".
+              /[`'"]([A-Za-z_][\w.-]*)[`'"]\s+is\s+(?:not\s+(?:allowed|permitted|recognized|supported|accepted)|rejected)\b/i,
+              /\b(?:propert(?:y|ies)|field|attribute)\s+[`'"]([A-Za-z_][\w.-]*)[`'"]\s+is\s+not\s+(?:allowed|permitted|recognized|supported|accepted)\b/i,
+              // Title shorthand: "Missing <propName>" with no surrounding "property" word.
+              // Capture only if the name looks like camelCase/PascalCase (>=4 chars, contains an inner uppercase).
+              /\bmissing\s+[`'"]?([a-z][a-zA-Z0-9]*[A-Z][A-Za-z0-9]{2,})[`'"]?\b/,
             ];
 
             // Fallback: matches "NAME property is missing" (name precedes "property is/are missing").
@@ -147,9 +155,11 @@ jobs:
               // Strip the GitHub issue-template scaffolding so its labels
               // (e.g. "### Issue Type\nMissing property(s)") don't trip up
               // free-text regexes that look for "type ... missing" etc.
+              // Bodies imported from upstream often have all newlines collapsed,
+              // so don't anchor on line-starts.
               const stripped = text
-                .replace(/^###\s+Issue\s+Type\s*$[\s\S]*?(?=^###\s|\Z)/gim, '')
-                .replace(/^###\s+[^\n]+$/gm, '');
+                .replace(/###\s+Issue\s+Type[\s\S]*?(?=###\s|$)/gi, ' ')
+                .replace(/###\s+(?:Resource\s+Type|Api\s+Version|Bicep\s+Repro|Confirm|Other\s+Notes)\b/gi, ' ');
               return {
                 rps: [...rpMap.values()],
                 types: [...typeMap.values()],
