@@ -75,7 +75,8 @@ jobs:
             // Language indicating "the type itself is wrong / unavailable / does not exist".
             // Intentionally separate from missing-property language.
             const TYPE_ISSUE_REGEXES = [
-              /\btype\s+(?:is\s+)?(?:unavailable|not\s+available|missing|not\s+found)/i,
+              /\b(?:resource\s+)?type\s+(?:is\s+)?(?:unavailable|not\s+available|not\s+found)\b/i,
+              /\bresource\s+type\s+(?:is\s+)?missing\b/i,
               /\btype\s+does(?:\s+not|n['']?t)\s+exist/i,
               /\bno\s+such\s+resource\s+type\b/i,
               /\bunknown\s+resource\s+type\b/i,
@@ -143,13 +144,19 @@ jobs:
                 const c = [normalizeNs(ns), ...rest].join('/');
                 if (!typeMap.has(c.toLowerCase())) typeMap.set(c.toLowerCase(), c);
               }
+              // Strip the GitHub issue-template scaffolding so its labels
+              // (e.g. "### Issue Type\nMissing property(s)") don't trip up
+              // free-text regexes that look for "type ... missing" etc.
+              const stripped = text
+                .replace(/^###\s+Issue\s+Type\s*$[\s\S]*?(?=^###\s|\Z)/gim, '')
+                .replace(/^###\s+[^\n]+$/gm, '');
               return {
                 rps: [...rpMap.values()],
                 types: [...typeMap.values()],
-                hasMissingPropertyLanguage: MISSING_PROPERTY_REGEXES.some(r => r.test(text)),
-                hasTypeIssueLanguage: TYPE_ISSUE_REGEXES.some(r => r.test(text)),
-                hasBugLanguage: BUG_REGEXES.some(r => r.test(text)),
-                propertyName: extractMissingProperty(text),
+                hasMissingPropertyLanguage: MISSING_PROPERTY_REGEXES.some(r => r.test(stripped)),
+                hasTypeIssueLanguage: TYPE_ISSUE_REGEXES.some(r => r.test(stripped)),
+                hasBugLanguage: BUG_REGEXES.some(r => r.test(stripped)),
+                propertyName: extractMissingProperty(stripped),
               };
             }
 
