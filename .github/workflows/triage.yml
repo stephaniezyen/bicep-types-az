@@ -239,16 +239,79 @@ jobs:
             // Determine the *primary* resource provider(s) for labeling:
             //   1. Any `Microsoft.X/y` types mentioned in the title → use their RPs.
             //   2. Else any `Microsoft.X` RPs mentioned in the title → use those.
-            //   3. Else any `Microsoft.X/y` types in the body → use their RPs.
-            //   4. Else fall back to RPs found anywhere in the body.
-            // This prevents labeling every RP that happens to be name-dropped in
-            // a body that's really about one specific resource.
+            //   3. Else any English keyword in the title that maps to a known RP
+            //      (e.g. "storage account" → Microsoft.Storage).
+            //   4. Else any `Microsoft.X/y` types in the body → use their RPs.
+            //   5. Else fall back to RPs found anywhere in the body.
+            // In every case, deprioritize "wrapper" RPs (Microsoft.Resources/deployments)
+            // that show up in every ARM deployment error trace but rarely describe the
+            // actual subject of the report.
+
+            // Generic ARM deployment wrappers — present in nearly every error trace.
+            // Keep these only if NO other RP is mentioned anywhere.
+            const WRAPPER_TYPES = new Set([
+              'microsoft.resources/deployments',
+              'microsoft.resources/deploymentscripts',
+              'microsoft.resources/deploymentstacks',
+            ]);
+            const WRAPPER_RPS = new Set([
+              // Wrappers as bare RPs only deprioritized if they appear ONLY because of
+              // wrapper types — handled below by filtering deployments-typed mentions.
+            ]);
+            function nonWrapperTypes(types) {
+              return types.filter(t => !WRAPPER_TYPES.has(t.toLowerCase()));
+            }
+
+            // Keyword → RP fallback for titles that describe the resource in English
+            // (e.g. "storage account services" with no `Microsoft.Storage` token).
+            const KEYWORD_TO_RP = [
+              [/\bstorage\s+accounts?\b/i, 'Microsoft.Storage'],
+              [/\bkey\s*vault\b/i, 'Microsoft.KeyVault'],
+              [/\bweb\s+app\b|\bapp\s+service\b|\bfunction\s+app\b/i, 'Microsoft.Web'],
+              [/\bvirtual\s+machine\b|\bvm\b/i, 'Microsoft.Compute'],
+              [/\bvirtual\s+network\b|\bvnet\b/i, 'Microsoft.Network'],
+              [/\bcosmos\s*db\b/i, 'Microsoft.DocumentDB'],
+              [/\bservice\s+bus\b/i, 'Microsoft.ServiceBus'],
+              [/\bevent\s+hub\b/i, 'Microsoft.EventHub'],
+              [/\bevent\s+grid\b/i, 'Microsoft.EventGrid'],
+              [/\bapi\s+management\b/i, 'Microsoft.ApiManagement'],
+              [/\bcontainer\s+(?:registry|app|instance)s?\b/i, null],
+              [/\bcontainer\s+registry\b/i, 'Microsoft.ContainerRegistry'],
+              [/\bcontainer\s+app\b/i, 'Microsoft.App'],
+              [/\baks\b|\bkubernetes\s+service\b/i, 'Microsoft.ContainerService'],
+              [/\blog\s+analytics\b/i, 'Microsoft.OperationalInsights'],
+              [/\bapplication\s+insights\b/i, 'Microsoft.Insights'],
+              [/\bredis\b/i, 'Microsoft.Cache'],
+              [/\bsignalr\b/i, 'Microsoft.SignalRService'],
+              [/\bsql\s+(?:server|database|db)\b/i, 'Microsoft.Sql'],
+              [/\bpostgres(?:ql)?\b/i, 'Microsoft.DBforPostgreSQL'],
+              [/\bmysql\b/i, 'Microsoft.DBforMySQL'],
+              [/\bmachine\s+learning\b/i, 'Microsoft.MachineLearningServices'],
+            ].filter(([, rp]) => rp);
+
+            function keywordRpsFromTitle(title) {
+              const hits = new Set();
+              for (const [re, rp] of KEYWORD_TO_RP) {
+                if (re.test(title)) hits.add(rp);
+              }
+              return [...hits];
+            }
+
             const titleCls = classify(issue.title || '');
+            const titleNonWrapperTypes = nonWrapperTypes(titleCls.types);
+            const bodyNonWrapperTypes = nonWrapperTypes(cls.types);
+            const keywordRps = keywordRpsFromTitle(issue.title || '');
+
             let primaryRps;
-            if (titleCls.types.length > 0) {
-              primaryRps = [...new Set(titleCls.types.map(t => t.split('/')[0]))];
+            if (titleNonWrapperTypes.length > 0) {
+              primaryRps = [...new Set(titleNonWrapperTypes.map(t => t.split('/')[0]))];
             } else if (titleCls.rps.length > 0) {
-              primaryRps = titleCls.rps;
+              primaryRps = titleCls.rps.filter(r => r.toLowerCase() !== 'microsoft.resources' || cls.rps.length === 1);
+              if (primaryRps.length === 0) primaryRps = titleCls.rps;
+            } else if (keywordRps.length > 0) {
+              primaryRps = keywordRps;
+            } else if (bodyNonWrapperTypes.length > 0) {
+              primaryRps = [...new Set(bodyNonWrapperTypes.map(t => t.split('/')[0]))];
             } else if (cls.types.length > 0) {
               primaryRps = [...new Set(cls.types.map(t => t.split('/')[0]))];
             } else {
@@ -256,7 +319,7 @@ jobs:
             }
             core.info(
               `Extracted rps=[${cls.rps.join(', ')}] types=[${cls.types.join(', ')}] ` +
-              `primaryRps=[${primaryRps.join(', ')}] ` +
+              `keywordRps=[${keywordRps.join(', ')}] primaryRps=[${primaryRps.join(', ')}] ` +
               `typeIssue=${cls.hasTypeIssueLanguage} missingProp=${cls.hasMissingPropertyLanguage} ` +
               `bug=${cls.hasBugLanguage} propertyName=${cls.propertyName || ''}`
             );
@@ -418,7 +481,9 @@ jobs:
                 lines.push(`- **Resource provider${primaryRps.length > 1 ? 's' : ''}:** ` +
                   primaryRps.map(r => `\`${r}\``).join(', '));
               }
-              const primaryTypes = (titleCls.types.length > 0 ? titleCls.types : cls.types);
+              const primaryTypes = (titleNonWrapperTypes.length > 0
+                ? titleNonWrapperTypes
+                : (bodyNonWrapperTypes.length > 0 ? bodyNonWrapperTypes : cls.types));
               if (primaryTypes.length > 0) {
                 lines.push(`- **Type${primaryTypes.length > 1 ? 's' : ''}:** ` +
                   primaryTypes.map(t => `\`${t}\``).join(', '));
