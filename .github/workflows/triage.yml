@@ -296,16 +296,26 @@ jobs:
                 .replace(/`[^`\n]+`/g, ' ');
             }
 
-            // Language indicating "the type itself is wrong / unavailable / does not exist".
-            // Intentionally separate from missing-property language.
-            const TYPE_ISSUE_REGEXES = [
+            // Language indicating "the type itself is unavailable / doesn't exist /
+            // hasn't been generated yet". This is distinct from "the type exists but
+            // its schema is wrong" (TYPE_ISSUE_REGEXES below).
+            const TYPE_UNAVAILABLE_REGEXES = [
               /\b(?:resource\s+)?type\s+(?:is\s+)?(?:unavailable|not\s+available|not\s+found)\b/i,
               /\bresource\s+type\s+(?:is\s+)?missing\b/i,
-              /\btype\s+does(?:\s+not|n['']?t)\s+exist/i,
+              /\btype\s+does(?:\s+not|n['']?t)\s+exist\b/i,
               /\bno\s+such\s+resource\s+type\b/i,
               /\bunknown\s+resource\s+type\b/i,
               /\bBCP081\b/i,
               /\bResource\s+type\s+[^\n.]{0,80}\s+does\s+not\s+have\s+types\s+available\b/i,
+              /\b(?:type|types)\s+(?:for|of)\s+[`'"][^`'"\n]+[`'"]\s+(?:are\s+|is\s+)?(?:not\s+)?(?:yet\s+)?(?:available|defined|generated|published)\b/i,
+              /\bno\s+types\s+(?:available|defined|generated|published)\b/i,
+              /\btypes?\s+(?:not\s+)?(?:yet\s+)?(?:generated|published|defined)\b/i,
+              /\bmissing\s+(?:resource\s+)?type\s+definition\b/i,
+            ];
+
+            // Language indicating "the type exists but its schema is wrong".
+            // Intentionally separate from missing-property + types-unavailable.
+            const TYPE_ISSUE_REGEXES = [
               /\btype\s+(?:definition\s+)?is\s+(?:wrong|incorrect|inaccurate)/i,
               /\btype\s+(?:definition\s+)?(?:for|of)\b[^\n]{0,100}?\bis\s+(?:wrong|incorrect|inaccurate)/i,
               /\b(?:wrong|incorrect|inaccurate)\s+type\s+(?:for|on)\b/i,
@@ -395,6 +405,7 @@ jobs:
                 types,
                 hasMissingPropertyLanguage: hasMP,
                 hasTypeIssueLanguage: TYPE_ISSUE_REGEXES.some(r => r.test(stripped)),
+                hasTypeUnavailableLanguage: TYPE_UNAVAILABLE_REGEXES.some(r => r.test(stripped)),
                 hasBugLanguage: BUG_REGEXES.some(r => r.test(stripped)),
                 propertyName,
                 propertyNames,
@@ -551,7 +562,7 @@ jobs:
             core.info(
               `Extracted rps=[${cls.rps.join(', ')}] types=[${cls.types.join(', ')}] ` +
               `keywordRps=[${keywordRps.join(', ')}] primaryRps=[${primaryRps.join(', ')}] ` +
-              `typeIssue=${cls.hasTypeIssueLanguage} missingProp=${cls.hasMissingPropertyLanguage} ` +
+              `typeIssue=${cls.hasTypeIssueLanguage} typeUnavail=${cls.hasTypeUnavailableLanguage} missingProp=${cls.hasMissingPropertyLanguage} ` +
               `bug=${cls.hasBugLanguage} properties=${(cls.propertyNames || []).join(',')}`
             );
 
@@ -589,6 +600,10 @@ jobs:
 
             if (cls.hasTypeIssueLanguage) {
               labelsToApply.add('type issue');
+            }
+
+            if (cls.hasTypeUnavailableLanguage) {
+              labelsToApply.add('types unavailable');
             }
 
             if (cls.hasBugLanguage) {
@@ -680,6 +695,8 @@ jobs:
               await removeLabelIf('missing property');
               await removeLabelIf('property found');
             }
+            if (!labelsToApply.has('types unavailable')) await removeLabelIf('types unavailable');
+            if (!labelsToApply.has('type issue')) await removeLabelIf('type issue');
 
             // --- Title normalization for confirmed missing-property issues ---
             if (cls.hasMissingPropertyLanguage && cls.propertyNames.length > 0 && cls.types.length > 0 &&
