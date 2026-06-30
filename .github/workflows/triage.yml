@@ -99,6 +99,7 @@ jobs:
               'azure','microsoft','i','it','we','you','they','please','still','need','want',
               // Common tag/prefix words found in issue titles like "Test:", "Bug:", "Feature:".
               'test','tests','testing','bug','bugs','feature','fix','wip','draft','rfc','question','help',
+              'bicep','arm','json','yaml','terraform','template','templates','repro','example','examples',
               // Common Azure resource-type plural segments that camelCase but aren't properties.
               'services','workspaces','accounts','storageaccounts','virtualmachines','servers','databases',
               'webtests','networkinterfaces','components','registrations','registries','vaults',
