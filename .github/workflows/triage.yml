@@ -349,6 +349,38 @@ jobs:
               return 'Microsoft.' + norm;
             }
 
+            // API version extraction.
+            // Date-based ARM versions: yyyy-MM-dd with optional -preview / -beta /
+            // -alpha / -privatepreview suffix and an optional revision number
+            // (e.g. 2024-01-01-preview, 2024-01-01-preview-01).
+            const VERSION_TOKEN = /\b(\d{4}-\d{2}-\d{2}(?:-(?:preview|beta|alpha|privatepreview)(?:-\d+)?)?)\b/g;
+            function extractApiVersion(title, body) {
+              const text = (title || '') + '\n' + (body || '');
+              // 1. Azure issue-template "### Api Version" block.
+              const tmpl = /###\s+Api\s+Version\s*[\r\n]+\s*([0-9][^\r\n]*)/i.exec(text);
+              if (tmpl) {
+                const tm = VERSION_TOKEN.exec(tmpl[1]);
+                VERSION_TOKEN.lastIndex = 0;
+                if (tm) return tm[1];
+              }
+              VERSION_TOKEN.lastIndex = 0;
+              // 2. `<type>@<version>` in resource declarations.
+              const atVer = /Microsoft\.[A-Z][A-Za-z0-9]*\/[^\s'"`@]+@(\d{4}-\d{2}-\d{2}(?:-(?:preview|beta|alpha|privatepreview)(?:-\d+)?)?)/.exec(text);
+              if (atVer) return atVer[1];
+              // 3. apiVersion: '<version>' / "apiVersion": "<version>".
+              const apiVer = /["']?api[Vv]ersion["']?\s*[:=]\s*["']?(\d{4}-\d{2}-\d{2}(?:-(?:preview|beta|alpha|privatepreview)(?:-\d+)?)?)["']?/.exec(text);
+              if (apiVer) return apiVer[1];
+              // 4. Fallback: most-frequently mentioned bare version token.
+              const counts = new Map();
+              let m;
+              VERSION_TOKEN.lastIndex = 0;
+              while ((m = VERSION_TOKEN.exec(text)) !== null) {
+                counts.set(m[1], (counts.get(m[1]) || 0) + 1);
+              }
+              if (counts.size === 0) return null;
+              return [...counts.entries()].sort((a, b) => b[1] - a[1])[0][0];
+            }
+
             function classify(text, opts) {
               opts = opts || {};
               const title = opts.title || '';
@@ -409,6 +441,7 @@ jobs:
                 hasBugLanguage: BUG_REGEXES.some(r => r.test(stripped)),
                 propertyName,
                 propertyNames,
+                apiVersion: extractApiVersion(title, body),
               };
             }
 
@@ -563,7 +596,8 @@ jobs:
               `Extracted rps=[${cls.rps.join(', ')}] types=[${cls.types.join(', ')}] ` +
               `keywordRps=[${keywordRps.join(', ')}] primaryRps=[${primaryRps.join(', ')}] ` +
               `typeIssue=${cls.hasTypeIssueLanguage} typeUnavail=${cls.hasTypeUnavailableLanguage} missingProp=${cls.hasMissingPropertyLanguage} ` +
-              `bug=${cls.hasBugLanguage} properties=${(cls.propertyNames || []).join(',')}`
+              `bug=${cls.hasBugLanguage} properties=${(cls.propertyNames || []).join(',')} ` +
+              `apiVersion=${cls.apiVersion || ''}`
             );
 
             // Idempotency: if we've already triaged this issue, don't re-comment.
@@ -768,6 +802,9 @@ jobs:
               if (primaryTypes.length > 0) {
                 lines.push(`- **Type${primaryTypes.length > 1 ? 's' : ''}:** ` +
                   primaryTypes.map(t => `\`${t}\``).join(', '));
+              }
+              if (cls.apiVersion) {
+                lines.push(`- **API version:** \`${cls.apiVersion}\``);
               }
               if (cls.hasTypeIssueLanguage) {
                 lines.push(`- Labeled \`type issue\` based on language about the type being wrong or unavailable.`);
