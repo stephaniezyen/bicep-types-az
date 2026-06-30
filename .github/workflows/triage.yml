@@ -65,12 +65,16 @@ jobs:
             const missAlt = MISS_TERMS.map(escapeRe).join('|');
             const propAlt = PROP_TERMS.join('|');
 
+            // Stricter boundaries for the "prop word" — must not be inside a
+            // hyphenated compound like "reference-property" (which is not the
+            // user asserting a property is missing — it's ARM internal jargon).
+            const PROP_WORD_PATTERN = `(?<![\\w-])(?:${propAlt})(?![\\w-])`;
             // Co-occurrence within a small character window (~80 chars ≈ 12-15 tokens).
             // Direction-agnostic: either "miss ... prop" or "prop ... miss".
             const MISS_NEAR_PROP = new RegExp(
-              `(?:\\b(?:${missAlt})\\b[^\\n.]{0,80}?\\b(?:${propAlt})\\b)` +
+              `(?:\\b(?:${missAlt})\\b[^\\n.]{0,80}?${PROP_WORD_PATTERN})` +
               `|` +
-              `(?:\\b(?:${propAlt})\\b[^\\n.]{0,80}?\\b(?:${missAlt})\\b)`,
+              `(?:${PROP_WORD_PATTERN}[^\\n.]{0,80}?\\b(?:${missAlt})\\b)`,
               'i'
             );
 
@@ -82,9 +86,26 @@ jobs:
             //      or PascalCase tokens >= 3 chars long, filtered against stopwords.
             //   3. If still nothing, look for "missing <camelCaseName>" patterns
             //      (title shorthand like "Missing networkAcls").
-            const PROP_WORD_REGEX = new RegExp(`\\b(?:${propAlt})\\b`, 'gi');
+            const PROP_WORD_REGEX = new RegExp(PROP_WORD_PATTERN, 'gi');
             const QUOTED_IDENT = /[`'"]([A-Za-z_][\w.-]*)[`'"]/g;
             const CAMEL_IDENT = /\b([A-Za-z_][\w.-]*)\b/g;
+
+            // Strong signals that the issue is about a *resource* missing or a
+            // deployment failure, NOT a missing schema property. When the only
+            // missing-property language sits inside such a trace, we should not
+            // classify the issue as "missing property".
+            const RESOURCE_NOT_FOUND_PATTERNS = [
+              /\bResource(?:Group)?NotFound\b/,
+              /\bResource\s+['"`][^'"`\n]+['"`]?\s+(?:does\s+not\s+exist|was\s+not\s+found|cannot\s+be\s+found)\b/i,
+              /\bResource\s+not\s+found\b/i,
+              /\bDeploymentFailed\b/,
+              /\b"code"\s*:\s*"NotFound"/i,
+              /\bcode\s*[:=]\s*['"]?NotFound['"]?/i,
+            ];
+            const RESOURCE_NOT_FOUND_RE = new RegExp(
+              RESOURCE_NOT_FOUND_PATTERNS.map(r => r.source).join('|'),
+              'i'
+            );
 
             const PROPERTY_NAME_STOPWORDS = new Set([
               'the','a','an','this','that','these','those','my','our','your','their','its','his','her',
@@ -338,6 +359,7 @@ jobs:
                 .replace(/###\s+Issue\s+Type[\s\S]*?(?=###\s|$)/gi, ' ')
                 .replace(/###\s+(?:Resource\s+Type|Api\s+Version|Bicep\s+Repro|Confirm|Other\s+Notes)\b/gi, ' ');
               const stripped = stripTemplate(text);
+              const strippedNoCode = stripCode(stripped);
               // Layered extraction. Pass types so resource-type segments aren't
               // mistaken for property names.
               const propertyNames = title
@@ -347,9 +369,23 @@ jobs:
               // If we extracted a property purely via the inverted "X is not allowed" fallback,
               // treat that as missing-property language even when MISS_NEAR_PROP didn't fire.
               INVERTED_PHRASE_RE.lastIndex = 0;
-              const hasMP = MISS_NEAR_PROP.test(stripped) ||
+              let hasMP = MISS_NEAR_PROP.test(stripped) ||
                 (propertyNames.length > 0 && INVERTED_PHRASE_RE.test(stripped));
               INVERTED_PHRASE_RE.lastIndex = 0;
+              // Resource-not-found / deployment-failure guard.
+              // If the body contains a strong "the resource is missing / deployment
+              // failed" signal AND the missing-property language only appears inside
+              // code blocks (i.e. it's quoted from an ARM error trace, not asserted
+              // by the user in prose), suppress missing-property classification.
+              if (hasMP && RESOURCE_NOT_FOUND_RE.test(stripped)) {
+                const propLanguageInProse =
+                  MISS_NEAR_PROP.test(strippedNoCode) ||
+                  (propertyNames.length > 0 && INVERTED_PHRASE_RE.test(strippedNoCode));
+                INVERTED_PHRASE_RE.lastIndex = 0;
+                if (!propLanguageInProse) {
+                  hasMP = false;
+                }
+              }
               return {
                 rps: [...rpMap.values()],
                 types,
