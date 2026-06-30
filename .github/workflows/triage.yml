@@ -97,6 +97,11 @@ jobs:
               'unrecognized','unsupported','allowed','permitted','recognized','supported','accepted','exposed',
               'value','values','string','strings','int','integer','number','bool','boolean','array',
               'azure','microsoft','i','it','we','you','they','please','still','need','want',
+              // Common tag/prefix words found in issue titles like "Test:", "Bug:", "Feature:".
+              'test','tests','testing','bug','bugs','feature','fix','wip','draft','rfc','question','help',
+              // Common Azure resource-type plural segments that camelCase but aren't properties.
+              'services','workspaces','accounts','storageaccounts','virtualmachines','servers','databases',
+              'webtests','networkinterfaces','components','registrations','registries','vaults',
             ]);
 
             function isPlausiblePropertyName(name) {
@@ -109,50 +114,156 @@ jobs:
               return true;
             }
             function isLikelyIdentifier(name) {
-              // camelCase or PascalCase or contains digits/underscores/dots — bias toward
-              // anything that looks like a code identifier rather than a plain English word.
-              return /[A-Z]/.test(name) || /[_\d.]/.test(name) || name.length >= 6;
+              // Real property names are camelCase/PascalCase or contain digits/underscores.
+              // Plain-English words of any length (e.g. "noticed", "missing") shouldn't qualify.
+              if (/^Microsoft\./i.test(name)) return false;
+              return /[A-Z]/.test(name) || /[_\d]/.test(name);
             }
 
-            function extractMissingProperty(text) {
+            // Build a set of "off-limits" tokens dynamically: any segment of a
+            // detected resource type (e.g. "storageAccounts" from
+            // "Microsoft.Storage/storageAccounts") shouldn't be returned as a
+            // property name — it's the resource itself.
+            function buildExclusions(typeStrings) {
+              const ex = new Set();
+              for (const t of typeStrings || []) {
+                for (const seg of t.split('/')) {
+                  // skip "Microsoft.X" namespaces
+                  if (seg.toLowerCase().startsWith('microsoft.')) continue;
+                  ex.add(seg.toLowerCase());
+                }
+              }
+              return ex;
+            }
+
+            // Strip common title-prefix tags that look like "Tag: rest of title".
+            // Examples: "Test: ...", "Bug: ...", "[Microsoft.X/y]: ...".
+            function stripTitlePrefix(title) {
+              return (title || '')
+                .replace(/^\s*\[[^\]]+\]\s*:\s*/, '')        // [Microsoft.X/y]: ...
+                .replace(/^\s*[A-Za-z][\w-]{0,15}\s*:\s+/, '') // Test: / Bug: / WIP: ...
+                .trim();
+            }
+
+            function extractPropertyCandidates(text, excludeNames) {
+              excludeNames = excludeNames || new Set();
               const candidates = [];
+              const seen = new Set(); // dedupe by lowercased name
               const propMatches = [...text.matchAll(PROP_WORD_REGEX)];
               for (const pm of propMatches) {
                 const idx = pm.index;
                 const winStart = Math.max(0, idx - 60);
                 const winEnd = Math.min(text.length, idx + pm[0].length + 60);
                 const window = text.slice(winStart, winEnd);
-                // Quoted identifiers win.
+                const addCandidate = (name, offset, quoted) => {
+                  if (!isPlausiblePropertyName(name)) return;
+                  if (excludeNames.has(name.toLowerCase())) return;
+                  const key = name.toLowerCase();
+                  if (seen.has(key)) return;
+                  seen.add(key);
+                  candidates.push({ name, offset, quoted, distance: Math.abs(offset - idx) });
+                };
                 let qm;
                 QUOTED_IDENT.lastIndex = 0;
                 while ((qm = QUOTED_IDENT.exec(window)) !== null) {
-                  if (isPlausiblePropertyName(qm[1])) {
-                    const offset = winStart + qm.index;
-                    candidates.push({ name: qm[1], offset, quoted: true, distance: Math.abs(offset - idx) });
-                  }
+                  addCandidate(qm[1], winStart + qm.index, true);
                 }
-                // Fallback: camelCase-ish identifiers.
                 let cm;
                 CAMEL_IDENT.lastIndex = 0;
                 while ((cm = CAMEL_IDENT.exec(window)) !== null) {
-                  const name = cm[1];
-                  if (!isPlausiblePropertyName(name)) continue;
-                  if (!isLikelyIdentifier(name)) continue;
-                  const offset = winStart + cm.index;
-                  candidates.push({ name, offset, quoted: false, distance: Math.abs(offset - idx) });
+                  if (!isLikelyIdentifier(cm[1])) continue;
+                  addCandidate(cm[1], winStart + cm.index, false);
                 }
               }
-              if (candidates.length > 0) {
-                // Prefer quoted; then closest to the "property" word.
-                candidates.sort((a, b) =>
-                  (b.quoted - a.quoted) || (a.distance - b.distance)
-                );
-                return candidates[0].name;
+              // Also catch "missing <camelCaseName>" shorthand.
+              const shorthandRe = /\bmissing\s+[`'"]?([a-z][a-zA-Z0-9]*[A-Z][A-Za-z0-9]{2,})[`'"]?\b/g;
+              let sm;
+              while ((sm = shorthandRe.exec(text)) !== null) {
+                const name = sm[1];
+                if (!isPlausiblePropertyName(name)) continue;
+                if (excludeNames.has(name.toLowerCase())) continue;
+                const key = name.toLowerCase();
+                if (seen.has(key)) continue;
+                seen.add(key);
+                candidates.push({ name, offset: sm.index, quoted: true, distance: 0 });
               }
-              // Title shorthand: "missing <camelCaseName>" with no "property" word nearby.
-              const shorthand = /\bmissing\s+[`'"]?([a-z][a-zA-Z0-9]*[A-Z][A-Za-z0-9]{2,})[`'"]?\b/.exec(text);
-              if (shorthand && isPlausiblePropertyName(shorthand[1])) return shorthand[1];
+              candidates.sort((a, b) => (b.quoted - a.quoted) || (a.distance - b.distance));
+              return candidates;
+            }
+
+            // Returns either a single property name (string) or null.
+            // Layered: stripped title → body without code → body with code.
+            // The first layer that produces *any* candidate wins.
+            function extractMissingPropertyLayered(title, body, types) {
+              const exclude = buildExclusions(types);
+              const layers = [
+                stripTitlePrefix(title),
+                stripCode(body || ''),
+                body || '',
+              ];
+              for (const layer of layers) {
+                if (!layer) continue;
+                const cands = extractPropertyCandidates(layer, exclude);
+                if (cands.length > 0) return cands[0].name;
+              }
+              // Fallback: "<identifier> is not allowed/recognized/supported/permitted"
+              // catches phrasings without an explicit "property" word.
+              return extractInvertedFallback((title || '') + '\n' + (body || ''), exclude);
+            }
+
+            // Catches phrasings like:
+            //   "networkAcls is not allowed"
+            //   "publicNetworkAccess is not recognized"
+            //   "The property `foo` is unsupported"
+            // — i.e. the missing-ness verb is right after a candidate identifier.
+            const INVERTED_PHRASE_RE =
+              /[`'"]?([A-Za-z][A-Za-z0-9_]{2,})[`'"]?\s+(?:is|are)\s+(?:not\s+)?(?:allowed|recognized|supported|permitted|accepted|valid|defined|present|available)\b/g;
+            function extractInvertedFallback(text, excludeNames) {
+              excludeNames = excludeNames || new Set();
+              INVERTED_PHRASE_RE.lastIndex = 0;
+              let m;
+              while ((m = INVERTED_PHRASE_RE.exec(text)) !== null) {
+                const name = m[1];
+                if (!isPlausiblePropertyName(name)) continue;
+                if (!isLikelyIdentifier(name)) continue;
+                if (excludeNames.has(name.toLowerCase())) continue;
+                return name;
+              }
               return null;
+            }
+
+            // Returns ALL plausible property names found across layers (deduped),
+            // preserving the precedence: title-layer candidates first.
+            function extractAllMissingProperties(title, body, types) {
+              const exclude = buildExclusions(types);
+              const out = [];
+              const seen = new Set();
+              const layers = [
+                stripTitlePrefix(title),
+                stripCode(body || ''),
+                body || '',
+              ];
+              for (const layer of layers) {
+                if (!layer) continue;
+                const cands = extractPropertyCandidates(layer, exclude);
+                for (const c of cands) {
+                  const k = c.name.toLowerCase();
+                  if (seen.has(k)) continue;
+                  seen.add(k);
+                  out.push(c.name);
+                }
+              }
+              if (out.length === 0) {
+                const fb = extractInvertedFallback((title || '') + '\n' + (body || ''), exclude);
+                if (fb) out.push(fb);
+              }
+              return out;
+            }
+
+            // Legacy single-text variant used in dedup loops (no title/body split).
+            function extractMissingProperty(text) {
+              const cands = extractPropertyCandidates(text, new Set());
+              return cands.length > 0 ? cands[0].name : null;
             }
 
             // Strip fenced/inline code blocks so extraction doesn't pull identifiers
@@ -161,19 +272,6 @@ jobs:
               return text
                 .replace(/```[\s\S]*?```/g, ' ')
                 .replace(/`[^`\n]+`/g, ' ');
-            }
-
-            // Try title first (high signal), then body with code blocks removed,
-            // then full body as a last resort.
-            function extractMissingPropertyLayered(title, body) {
-              const t = title || '';
-              const bClean = stripCode(body || '');
-              const bFull = body || '';
-              return (
-                extractMissingProperty(t) ||
-                extractMissingProperty(bClean) ||
-                extractMissingProperty(bFull)
-              );
             }
 
             // Language indicating "the type itself is wrong / unavailable / does not exist".
@@ -234,21 +332,31 @@ jobs:
                 const c = [normalizeNs(ns), ...rest].join('/');
                 if (!typeMap.has(c.toLowerCase())) typeMap.set(c.toLowerCase(), c);
               }
+              const types = [...typeMap.values()];
               const stripTemplate = s => s
                 .replace(/###\s+Issue\s+Type[\s\S]*?(?=###\s|$)/gi, ' ')
                 .replace(/###\s+(?:Resource\s+Type|Api\s+Version|Bicep\s+Repro|Confirm|Other\s+Notes)\b/gi, ' ');
               const stripped = stripTemplate(text);
-              // Layered extraction: title first, then body with code stripped, then full body.
-              const propertyName = title
-                ? extractMissingPropertyLayered(stripTemplate(title), stripTemplate(body))
-                : extractMissingProperty(stripped);
+              // Layered extraction. Pass types so resource-type segments aren't
+              // mistaken for property names.
+              const propertyNames = title
+                ? extractAllMissingProperties(stripTemplate(title), stripTemplate(body), types)
+                : (extractMissingProperty(stripped) ? [extractMissingProperty(stripped)] : []);
+              const propertyName = propertyNames[0] || null;
+              // If we extracted a property purely via the inverted "X is not allowed" fallback,
+              // treat that as missing-property language even when MISS_NEAR_PROP didn't fire.
+              INVERTED_PHRASE_RE.lastIndex = 0;
+              const hasMP = MISS_NEAR_PROP.test(stripped) ||
+                (propertyNames.length > 0 && INVERTED_PHRASE_RE.test(stripped));
+              INVERTED_PHRASE_RE.lastIndex = 0;
               return {
                 rps: [...rpMap.values()],
-                types: [...typeMap.values()],
-                hasMissingPropertyLanguage: MISS_NEAR_PROP.test(stripped),
+                types,
+                hasMissingPropertyLanguage: hasMP,
                 hasTypeIssueLanguage: TYPE_ISSUE_REGEXES.some(r => r.test(stripped)),
                 hasBugLanguage: BUG_REGEXES.some(r => r.test(stripped)),
                 propertyName,
+                propertyNames,
               };
             }
 
@@ -403,7 +511,7 @@ jobs:
               `Extracted rps=[${cls.rps.join(', ')}] types=[${cls.types.join(', ')}] ` +
               `keywordRps=[${keywordRps.join(', ')}] primaryRps=[${primaryRps.join(', ')}] ` +
               `typeIssue=${cls.hasTypeIssueLanguage} missingProp=${cls.hasMissingPropertyLanguage} ` +
-              `bug=${cls.hasBugLanguage} propertyName=${cls.propertyName || ''}`
+              `bug=${cls.hasBugLanguage} properties=${(cls.propertyNames || []).join(',')}`
             );
 
             // Idempotency: if we've already triaged this issue, don't re-comment.
@@ -414,16 +522,24 @@ jobs:
               c.user && c.user.type === 'Bot' && (c.body || '').includes(MARKER)
             );
 
-            // --- Property verification against docs (only when we have a named property + a type) ---
-            let propertyVerification = null; // { found: bool, url, type, property }
-            if (cls.hasMissingPropertyLanguage && cls.propertyName && cls.types.length > 0) {
+            // --- Property verification against docs (only when we have named properties + a type) ---
+            // propertyVerification: { found: bool, url, type, property, results: [{name, found}] }
+            let propertyVerification = null;
+            if (cls.hasMissingPropertyLanguage && cls.propertyNames.length > 0 && cls.types.length > 0) {
               const t = cls.types[0];
               const docs = await fetchDocsText(t);
               core.info(`Docs fetch for ${t}: status=${docs.status} length=${docs.text ? docs.text.length : 0}`);
               if (docs.text) {
-                const found = pageHasWord(docs.text, cls.propertyName);
-                propertyVerification = { found, url: docs.url, type: t, property: cls.propertyName };
-                core.info(`Property '${cls.propertyName}' found in docs for ${t}: ${found}`);
+                const results = cls.propertyNames.map(n => ({ name: n, found: pageHasWord(docs.text, n) }));
+                const allFound = results.every(r => r.found);
+                propertyVerification = {
+                  found: allFound,
+                  url: docs.url,
+                  type: t,
+                  property: cls.propertyName, // first one, back-compat
+                  results,
+                };
+                core.info(`Property check for ${t}: ${results.map(r => `${r.name}=${r.found}`).join(', ')}`);
               }
             }
 
@@ -518,9 +634,11 @@ jobs:
             if (labelsToApply.has('missing property')) await removeLabelIf('property found');
 
             // --- Title normalization for confirmed missing-property issues ---
-            if (cls.hasMissingPropertyLanguage && cls.propertyName && cls.types.length > 0 &&
+            if (cls.hasMissingPropertyLanguage && cls.propertyNames.length > 0 && cls.types.length > 0 &&
                 !(propertyVerification && propertyVerification.found)) {
-              const normalizedTitle = `[${cls.types[0]}]: ${cls.propertyName} property missing`;
+              const propsForTitle = cls.propertyNames.slice(0, 3).join(', ');
+              const wordForm = cls.propertyNames.length > 1 ? 'properties' : 'property';
+              const normalizedTitle = `[${cls.types[0]}]: ${propsForTitle} ${wordForm} missing`;
               if (issue.title !== normalizedTitle) {
                 await github.rest.issues.update({
                   owner, repo, issue_number: num, title: normalizedTitle,
@@ -539,9 +657,10 @@ jobs:
 
             // "Property found in docs" comment (contradiction).
             if (propertyVerification && propertyVerification.found) {
+              const list = propertyVerification.results.map(r => `\`${r.name}\``).join(', ');
               commentBlocks.push(
                 `I checked the Azure template docs for **\`${propertyVerification.type}\`** and found ` +
-                `the property \`${propertyVerification.property}\` documented:\n\n` +
+                `the propert${propertyVerification.results.length > 1 ? 'ies' : 'y'} ${list} documented:\n\n` +
                 `${propertyVerification.url}\n\n` +
                 `Could you double-check spelling and the API version you're targeting? ` +
                 `If the property is working for you, feel free to close.`
