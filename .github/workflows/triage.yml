@@ -673,6 +673,13 @@ jobs:
             }
             if (labelsToApply.has('property found')) await removeLabelIf('missing property');
             if (labelsToApply.has('missing property')) await removeLabelIf('property found');
+            // If neither classification applies anymore (e.g. previously flagged
+            // missing-property but the resource-not-found guard now suppresses it),
+            // strip both labels so stale state doesn't linger.
+            if (!labelsToApply.has('missing property') && !labelsToApply.has('property found')) {
+              await removeLabelIf('missing property');
+              await removeLabelIf('property found');
+            }
 
             // --- Title normalization for confirmed missing-property issues ---
             if (cls.hasMissingPropertyLanguage && cls.propertyNames.length > 0 && cls.types.length > 0 &&
