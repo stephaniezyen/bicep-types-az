@@ -34,6 +34,7 @@ jobs:
             const MISSING_PROPERTY_REGEXES = [
               /\bmissing\b[^.\n]{0,60}\b(propert|field|attribute)/i,
               /\b(propert(y|ies)|field|attribute)\s+\S+\s+(is|are)\s+missing\b/i,
+              /\b(propert(y|ies)|field|attribute)\s+missing\b/i,
               /\b(does(\s+not|n['']?t)|do(\s+not|n['']?t))\s+(have|expose|include|support|define|list)\b[^.\n]{0,60}\b(propert|field|attribute)/i,
               /\b(should|needs?\s+to)\s+(have|expose|include|support|define|list|add)\b[^.\n]{0,60}\b(propert|field|attribute)/i,
               /\black(s|ing)?\b[^.\n]{0,60}\b(propert|field|attribute)/i,
@@ -71,7 +72,7 @@ jobs:
 
             // Fallback: matches "NAME property is missing" (name precedes "property is/are missing").
             // Stopword-filtered to avoid capturing articles/pronouns like "the property is missing".
-            const NAME_BEFORE_PROPERTY_REGEX = /\b([A-Za-z_][\w.-]*)\s+(?:propert(?:y|ies)|field|attribute)\s+(?:is|are)\s+missing\b/gi;
+            const NAME_BEFORE_PROPERTY_REGEX = /\b([A-Za-z_][\w.-]*)\s+(?:propert(?:y|ies)|field|attribute)\s+(?:(?:is|are)\s+)?missing\b/gi;
             const PROPERTY_NAME_STOPWORDS = new Set([
               'the','a','an','this','that','these','those','my','our','your','their','its','his','her',
               'one','no','any','some','all','each','every','first','last','new','old','same','other','another',
