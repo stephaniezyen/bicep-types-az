@@ -31,55 +31,129 @@ jobs:
             const RP_REGEX = /(?<![.\/\w])Microsoft\.[A-Z][A-Za-z0-9]{2,}/g;
             const TYPE_REGEX = /(?<![.\/\w])Microsoft\.[A-Z][A-Za-z0-9]{2,}(?:\/[A-Za-z][A-Za-z0-9]*)+/g;
 
-            const MISSING_PROPERTY_REGEXES = [
-              /\bmissing\b[^.\n]{0,60}\b(propert|field|attribute)/i,
-              /\b(propert(y|ies)|field|attribute)\s+\S+\s+(is|are)\s+missing\b/i,
-              /\b(propert(y|ies)|field|attribute)\s+missing\b/i,
-              /\b(does(\s+not|n['']?t)|do(\s+not|n['']?t))\s+(have|expose|include|support|define|list)\b[^.\n]{0,60}\b(propert|field|attribute)/i,
-              /\b(should|needs?\s+to)\s+(have|expose|include|support|define|list|add)\b[^.\n]{0,60}\b(propert|field|attribute)/i,
-              /\black(s|ing)?\b[^.\n]{0,60}\b(propert|field|attribute)/i,
-              /\bunrecognized\s+propert/i,
-              /\b(propert(y|ies)|field|attribute)\s+\S+\s+(does(\s+not|n['']?t)\s+exist|is\s+not\s+(defined|exposed|present|available|listed))/i,
-              /\badd\s+[`'\w.\s]{0,40}(propert(y|ies)|field|attribute)\b/i,
-              /\bexpose\s+[`'\w.\s]{0,40}(propert|field|attribute)/i,
-              /\bnot\s+exposed\s+in\s+the\s+(type|schema|api)/i,
-              /[`'"][A-Za-z_][\w.-]*[`'"]\s+is\s+not\s+allowed\b/i,
-              /[`'"][A-Za-z_][\w.-]*[`'"]\s+is\s+(?:not\s+(?:permitted|recognized|supported))\b/i,
-            ];
+            // --- Missing-property heuristic (proximity-based, not regex pile) ---
+            //
+            // We detect "missing property" language by looking for one of:
+            //   (a) a "miss" word (missing, lacks, lacking, unrecognized, not allowed,
+            //       not exposed, doesn't have, etc.) near a "prop" word
+            //       (property/properties/field/fields/attribute/attributes), in either
+            //       direction, within a short token window; OR
+            //   (b) a "miss" verb phrase followed by an identifier that is plausibly a
+            //       property name (camelCase or backticked).
+            //
+            // Property-name extraction looks for the closest identifier to the "prop"
+            // word (preferring quoted/backticked identifiers, then camelCase tokens),
+            // filtered against a stopword set.
 
-            const PROPERTY_NAME_REGEXES = [
-              /\bmissing\b[^.\n]{0,60}?[`'"]([A-Za-z_][\w.-]*)[`'"]\s+(?:propert(?:y|ies)|field|attribute)/i,
-              /\b(?:propert(?:y|ies)|field|attribute)\s+[`'"]?([A-Za-z_][\w.-]*)[`'"]?\s+(?:is|are)\s+missing\b/i,
-              /\b(?:does(?:\s+not|n['']?t)|do(?:\s+not|n['']?t))\s+(?:have|expose|include|support|define|list)\b[^.\n]{0,60}?[`'"]([A-Za-z_][\w.-]*)[`'"]\s+(?:propert(?:y|ies)|field|attribute)/i,
-              /\b(?:should|needs?\s+to)\s+(?:have|expose|include|support|define|list|add)\b[^.\n]{0,60}?[`'"]([A-Za-z_][\w.-]*)[`'"]\s+(?:propert(?:y|ies)|field|attribute)/i,
-              /\black(?:s|ing)?\b[^.\n]{0,60}?[`'"]([A-Za-z_][\w.-]*)[`'"]\s+(?:propert(?:y|ies)|field|attribute)/i,
-              /\bunrecognized\s+propert(?:y|ies)?\s+[`'"]?([A-Za-z_][\w.-]*)[`'"]?/i,
-              /\b(?:propert(?:y|ies)|field|attribute)\s+[`'"]?([A-Za-z_][\w.-]*)[`'"]?\s+(?:does(?:\s+not|n['']?t)\s+exist|is\s+not\s+(?:defined|exposed|present|available|listed))/i,
-              /\badd\s+[`'"]?([A-Za-z_][\w.-]*)[`'"]?\s+(?:propert(?:y|ies)|field|attribute)\b/i,
-              /\bexpose\s+[`'"]?([A-Za-z_][\w.-]*)[`'"]?\s+(?:propert|field|attribute)/i,
-              // Type-issue phrasings that reference a specific property.
-              /\btype\s+(?:definition\s+)?(?:for|of)\s+[`'"]([A-Za-z_][\w.-]*)[`'"]/i,
-              /[`'"]([A-Za-z_][\w.-]*)[`'"]\s+(?:propert(?:y|ies)|field|attribute)\s+(?:has|have)\s+(?:the\s+)?(?:wrong|incorrect|inaccurate)\s+type/i,
-              /[`'"]([A-Za-z_][\w.-]*)[`'"]\s+(?:propert(?:y|ies)|field|attribute)\s+(?:on|of|in)\s+[`'"]?Microsoft\./i,
-              /\btype\s+(?:definition\s+)?(?:for|of)\s+(?:the\s+)?[`'"]?([A-Za-z_][\w.-]*)[`'"]?\s+(?:propert(?:y|ies)|field|attribute)/i,
-              // Inverted/template phrasings: "X is not allowed", "X is rejected".
-              /[`'"]([A-Za-z_][\w.-]*)[`'"]\s+is\s+(?:not\s+(?:allowed|permitted|recognized|supported|accepted)|rejected)\b/i,
-              /\b(?:propert(?:y|ies)|field|attribute)\s+[`'"]([A-Za-z_][\w.-]*)[`'"]\s+is\s+not\s+(?:allowed|permitted|recognized|supported|accepted)\b/i,
-              // Title shorthand: "Missing <propName>" with no surrounding "property" word.
-              // Capture only if the name looks like camelCase/PascalCase (>=4 chars, contains an inner uppercase).
-              /\bmissing\s+[`'"]?([a-z][a-zA-Z0-9]*[A-Z][A-Za-z0-9]{2,})[`'"]?\b/,
+            // Generic "missing-ness" words and short phrases.
+            const MISS_TERMS = [
+              'missing', 'lacks', 'lack', 'lacking',
+              'unrecognized', 'unsupported', 'unavailable',
+              'not allowed', 'not permitted', 'not recognized', 'not supported',
+              'not accepted', 'not exposed', 'not defined', 'not present',
+              'not listed', 'not available', "doesn't have", 'does not have',
+              "doesn't expose", 'does not expose', "doesn't include", 'does not include',
+              "doesn't support", 'does not support', "doesn't define", 'does not define',
+              'should have', 'should include', 'should support', 'should expose',
+              'should add', 'needs to have', 'needs to add', 'add support for',
+              'rejected',
             ];
+            const PROP_TERMS = ['property', 'properties', 'field', 'fields', 'attribute', 'attributes'];
 
-            // Fallback: matches "NAME property is missing" (name precedes "property is/are missing").
-            // Stopword-filtered to avoid capturing articles/pronouns like "the property is missing".
-            const NAME_BEFORE_PROPERTY_REGEX = /\b([A-Za-z_][\w.-]*)\s+(?:propert(?:y|ies)|field|attribute)\s+(?:(?:is|are)\s+)?missing\b/gi;
+            // Build an alternation regex (escape spaces; '.' isn't used in any term).
+            const escapeRe = s => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+            const missAlt = MISS_TERMS.map(escapeRe).join('|');
+            const propAlt = PROP_TERMS.join('|');
+
+            // Co-occurrence within a small character window (~80 chars ≈ 12-15 tokens).
+            // Direction-agnostic: either "miss ... prop" or "prop ... miss".
+            const MISS_NEAR_PROP = new RegExp(
+              `(?:\\b(?:${missAlt})\\b[^\\n.]{0,80}?\\b(?:${propAlt})\\b)` +
+              `|` +
+              `(?:\\b(?:${propAlt})\\b[^\\n.]{0,80}?\\b(?:${missAlt})\\b)`,
+              'i'
+            );
+
+            // For property-name extraction we want the identifier closest to the
+            // "property" word. Strategy:
+            //   1. Scan the text for any occurrence of a "prop" word.
+            //   2. Within a 60-char window on either side, find candidate identifiers:
+            //      preferred = `quoted`, "quoted", or 'quoted'; fallback = camelCase
+            //      or PascalCase tokens >= 3 chars long, filtered against stopwords.
+            //   3. If still nothing, look for "missing <camelCaseName>" patterns
+            //      (title shorthand like "Missing networkAcls").
+            const PROP_WORD_REGEX = new RegExp(`\\b(?:${propAlt})\\b`, 'gi');
+            const QUOTED_IDENT = /[`'"]([A-Za-z_][\w.-]*)[`'"]/g;
+            const CAMEL_IDENT = /\b([A-Za-z_][\w.-]*)\b/g;
+
             const PROPERTY_NAME_STOPWORDS = new Set([
               'the','a','an','this','that','these','those','my','our','your','their','its','his','her',
               'one','no','any','some','all','each','every','first','last','new','old','same','other','another',
               'is','are','was','were','will','should','must','can','may','might','has','have','had','do','does','did',
               'and','or','but','not','if','when','then','so','because','also','only','just','still','already',
-              'required','optional','important','expected','missing',
+              'required','optional','important','expected','missing','lack','lacks','lacking',
+              'property','properties','field','fields','attribute','attributes',
+              'type','types','resource','resources','definition','schema','api','for','of','on','in','from','with',
+              'unrecognized','unsupported','allowed','permitted','recognized','supported','accepted','exposed',
+              'value','values','string','strings','int','integer','number','bool','boolean','array',
+              'azure','microsoft','i','it','we','you','they','please','still','need','want',
             ]);
+
+            function isPlausiblePropertyName(name) {
+              if (!name) return false;
+              if (name.length < 3) return false;
+              if (PROPERTY_NAME_STOPWORDS.has(name.toLowerCase())) return false;
+              if (/^\d+$/.test(name)) return false;
+              // Must contain at least one letter.
+              if (!/[A-Za-z]/.test(name)) return false;
+              return true;
+            }
+            function isLikelyIdentifier(name) {
+              // camelCase or PascalCase or contains digits/underscores/dots — bias toward
+              // anything that looks like a code identifier rather than a plain English word.
+              return /[A-Z]/.test(name) || /[_\d.]/.test(name) || name.length >= 6;
+            }
+
+            function extractMissingProperty(text) {
+              const candidates = [];
+              const propMatches = [...text.matchAll(PROP_WORD_REGEX)];
+              for (const pm of propMatches) {
+                const idx = pm.index;
+                const winStart = Math.max(0, idx - 60);
+                const winEnd = Math.min(text.length, idx + pm[0].length + 60);
+                const window = text.slice(winStart, winEnd);
+                // Quoted identifiers win.
+                let qm;
+                QUOTED_IDENT.lastIndex = 0;
+                while ((qm = QUOTED_IDENT.exec(window)) !== null) {
+                  if (isPlausiblePropertyName(qm[1])) {
+                    const offset = winStart + qm.index;
+                    candidates.push({ name: qm[1], offset, quoted: true, distance: Math.abs(offset - idx) });
+                  }
+                }
+                // Fallback: camelCase-ish identifiers.
+                let cm;
+                CAMEL_IDENT.lastIndex = 0;
+                while ((cm = CAMEL_IDENT.exec(window)) !== null) {
+                  const name = cm[1];
+                  if (!isPlausiblePropertyName(name)) continue;
+                  if (!isLikelyIdentifier(name)) continue;
+                  const offset = winStart + cm.index;
+                  candidates.push({ name, offset, quoted: false, distance: Math.abs(offset - idx) });
+                }
+              }
+              if (candidates.length > 0) {
+                // Prefer quoted; then closest to the "property" word.
+                candidates.sort((a, b) =>
+                  (b.quoted - a.quoted) || (a.distance - b.distance)
+                );
+                return candidates[0].name;
+              }
+              // Title shorthand: "missing <camelCaseName>" with no "property" word nearby.
+              const shorthand = /\bmissing\s+[`'"]?([a-z][a-zA-Z0-9]*[A-Z][A-Za-z0-9]{2,})[`'"]?\b/.exec(text);
+              if (shorthand && isPlausiblePropertyName(shorthand[1])) return shorthand[1];
+              return null;
+            }
 
             // Language indicating "the type itself is wrong / unavailable / does not exist".
             // Intentionally separate from missing-property language.
@@ -124,23 +198,6 @@ jobs:
               return 'Microsoft.' + norm;
             }
 
-            function extractMissingProperty(text) {
-              for (const regex of PROPERTY_NAME_REGEXES) {
-                const match = regex.exec(text);
-                if (match?.[1]) return match[1];
-              }
-              // Fallback: "NAME property is missing" with stopword filter.
-              let m;
-              NAME_BEFORE_PROPERTY_REGEX.lastIndex = 0;
-              while ((m = NAME_BEFORE_PROPERTY_REGEX.exec(text)) !== null) {
-                const candidate = m[1];
-                if (candidate && !PROPERTY_NAME_STOPWORDS.has(candidate.toLowerCase())) {
-                  return candidate;
-                }
-              }
-              return null;
-            }
-
             function classify(text) {
               const rpMap = new Map();
               for (const m of text.matchAll(RP_REGEX)) {
@@ -164,7 +221,7 @@ jobs:
               return {
                 rps: [...rpMap.values()],
                 types: [...typeMap.values()],
-                hasMissingPropertyLanguage: MISSING_PROPERTY_REGEXES.some(r => r.test(stripped)),
+                hasMissingPropertyLanguage: MISS_NEAR_PROP.test(stripped),
                 hasTypeIssueLanguage: TYPE_ISSUE_REGEXES.some(r => r.test(stripped)),
                 hasBugLanguage: BUG_REGEXES.some(r => r.test(stripped)),
                 propertyName: extractMissingProperty(stripped),
