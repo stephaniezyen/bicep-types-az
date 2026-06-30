@@ -502,6 +502,21 @@ jobs:
               core.info('No labels to apply.');
             }
 
+            // --- Remove conflicting labels we no longer believe apply ---
+            // 'missing property' and 'property found' are mutually exclusive — keep
+            // whichever this run chose and strip the other if it lingers from a prior run.
+            const existingNames = new Set((issue.labels || []).map(l => (typeof l === 'string' ? l : l.name)));
+            async function removeLabelIf(name) {
+              if (existingNames.has(name) && !labelsToApply.has(name)) {
+                try {
+                  await github.rest.issues.removeLabel({ owner, repo, issue_number: num, name });
+                  core.info(`Removed stale label: ${name}`);
+                } catch (e) { /* 404 is fine */ }
+              }
+            }
+            if (labelsToApply.has('property found')) await removeLabelIf('missing property');
+            if (labelsToApply.has('missing property')) await removeLabelIf('property found');
+
             // --- Title normalization for confirmed missing-property issues ---
             if (cls.hasMissingPropertyLanguage && cls.propertyName && cls.types.length > 0 &&
                 !(propertyVerification && propertyVerification.found)) {
