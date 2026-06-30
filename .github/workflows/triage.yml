@@ -377,10 +377,14 @@ jobs:
               // failed" signal AND the missing-property language only appears inside
               // code blocks (i.e. it's quoted from an ARM error trace, not asserted
               // by the user in prose), suppress missing-property classification.
+              // Important: check prose in BODY ONLY — the title may have been
+              // renamed by a prior triage run and would otherwise re-trigger itself.
               if (hasMP && RESOURCE_NOT_FOUND_RE.test(stripped)) {
+                const bodyOnly = stripTemplate(body || '');
+                const bodyProse = stripCode(bodyOnly);
                 const propLanguageInProse =
-                  MISS_NEAR_PROP.test(strippedNoCode) ||
-                  (propertyNames.length > 0 && INVERTED_PHRASE_RE.test(strippedNoCode));
+                  MISS_NEAR_PROP.test(bodyProse) ||
+                  (propertyNames.length > 0 && INVERTED_PHRASE_RE.test(bodyProse));
                 INVERTED_PHRASE_RE.lastIndex = 0;
                 if (!propLanguageInProse) {
                   hasMP = false;
