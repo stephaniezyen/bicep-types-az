@@ -155,6 +155,27 @@ jobs:
               return null;
             }
 
+            // Strip fenced/inline code blocks so extraction doesn't pull identifiers
+            // out of Bicep/JSON repros (where any quoted string can look like a property).
+            function stripCode(text) {
+              return text
+                .replace(/```[\s\S]*?```/g, ' ')
+                .replace(/`[^`\n]+`/g, ' ');
+            }
+
+            // Try title first (high signal), then body with code blocks removed,
+            // then full body as a last resort.
+            function extractMissingPropertyLayered(title, body) {
+              const t = title || '';
+              const bClean = stripCode(body || '');
+              const bFull = body || '';
+              return (
+                extractMissingProperty(t) ||
+                extractMissingProperty(bClean) ||
+                extractMissingProperty(bFull)
+              );
+            }
+
             // Language indicating "the type itself is wrong / unavailable / does not exist".
             // Intentionally separate from missing-property language.
             const TYPE_ISSUE_REGEXES = [
@@ -198,7 +219,10 @@ jobs:
               return 'Microsoft.' + norm;
             }
 
-            function classify(text) {
+            function classify(text, opts) {
+              opts = opts || {};
+              const title = opts.title || '';
+              const body = opts.body || '';
               const rpMap = new Map();
               for (const m of text.matchAll(RP_REGEX)) {
                 const c = normalizeNs(m[0]);
@@ -210,21 +234,21 @@ jobs:
                 const c = [normalizeNs(ns), ...rest].join('/');
                 if (!typeMap.has(c.toLowerCase())) typeMap.set(c.toLowerCase(), c);
               }
-              // Strip the GitHub issue-template scaffolding so its labels
-              // (e.g. "### Issue Type\nMissing property(s)") don't trip up
-              // free-text regexes that look for "type ... missing" etc.
-              // Bodies imported from upstream often have all newlines collapsed,
-              // so don't anchor on line-starts.
-              const stripped = text
+              const stripTemplate = s => s
                 .replace(/###\s+Issue\s+Type[\s\S]*?(?=###\s|$)/gi, ' ')
                 .replace(/###\s+(?:Resource\s+Type|Api\s+Version|Bicep\s+Repro|Confirm|Other\s+Notes)\b/gi, ' ');
+              const stripped = stripTemplate(text);
+              // Layered extraction: title first, then body with code stripped, then full body.
+              const propertyName = title
+                ? extractMissingPropertyLayered(stripTemplate(title), stripTemplate(body))
+                : extractMissingProperty(stripped);
               return {
                 rps: [...rpMap.values()],
                 types: [...typeMap.values()],
                 hasMissingPropertyLanguage: MISS_NEAR_PROP.test(stripped),
                 hasTypeIssueLanguage: TYPE_ISSUE_REGEXES.some(r => r.test(stripped)),
                 hasBugLanguage: BUG_REGEXES.some(r => r.test(stripped)),
-                propertyName: extractMissingProperty(stripped),
+                propertyName,
               };
             }
 
@@ -293,7 +317,7 @@ jobs:
             }
 
             const text = `${issue.title || ''}\n\n${issue.body || ''}`;
-            const cls = classify(text);
+            const cls = classify(text, { title: issue.title || '', body: issue.body || '' });
             // Determine the *primary* resource provider(s) for labeling:
             //   1. Any `Microsoft.X/y` types mentioned in the title → use their RPs.
             //   2. Else any `Microsoft.X` RPs mentioned in the title → use those.
@@ -439,7 +463,7 @@ jobs:
                 if (other.pull_request) continue;
                 if (new Date(other.created_at) >= new Date(issue.created_at)) continue;
                 const otherText = `${other.title || ''}\n\n${other.body || ''}`;
-                const otherCls = classify(otherText);
+                const otherCls = classify(otherText, { title: other.title || '', body: other.body || '' });
                 const sharedType = otherCls.types.find(t => currentTypesLower.has(t.toLowerCase()));
                 if (!sharedType) continue;
                 if (otherCls.propertyName &&
