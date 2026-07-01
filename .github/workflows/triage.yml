@@ -124,6 +124,15 @@ jobs:
               // Common Azure resource-type plural segments that camelCase but aren't properties.
               'services','workspaces','accounts','storageaccounts','virtualmachines','servers','databases',
               'webtests','networkinterfaces','components','registrations','registries','vaults',
+              // Common English words that show up as sentence-starters or noise in
+              // issue prose but are not property names.
+              'error','errors','based','however','additionally','note','notes',
+              'example','examples','deployment','deployments','deploy','deployed','deploying',
+              'trying','tried','using','used','set','setting','sets','using',
+              'above','below','following','followed','after','before','during','while',
+              'reference','references','referenced','object','objects',
+              // Product/technology names that commonly appear as prose references.
+              'redis','graph','cosmos','sql','kusto','synapse','fabric','purview',
             ]);
 
             function isPlausiblePropertyName(name) {
