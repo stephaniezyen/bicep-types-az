@@ -536,12 +536,9 @@ jobs:
               const hasTypeUnavail =
                 tmplIssueType === 'type-unavailable' ||
                 TYPE_UNAVAILABLE_REGEXES.some(r => r.test(stripped));
-              const hasTypeIssueRaw =
+              const hasTypeIssue =
                 tmplIssueType === 'type-issue' ||
                 TYPE_ISSUE_REGEXES.some(r => r.test(stripped));
-              // Don't double-label: if it's clearly a type-unavailable issue,
-              // suppress the type-issue label (they're mutually exclusive).
-              const hasTypeIssue = hasTypeIssueRaw && !hasTypeUnavail;
               const hasBug =
                 tmplIssueType === 'bug' ||
                 BUG_REGEXES.some(r => r.test(stripped));
