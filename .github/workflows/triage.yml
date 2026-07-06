@@ -133,6 +133,11 @@ jobs:
               'reference','references','referenced','object','objects',
               // Product/technology names that commonly appear as prose references.
               'redis','graph','cosmos','sql','kusto','synapse','fabric','purview',
+              // API/protocol acronyms that show up in prose ("REST API", "SDK", etc.)
+              'rest','api','apis','sdk','http','https','url','uri','arm','json','yaml',
+              // Partial-word fragments that show up when regex splits on punctuation
+              // (e.g. "ApiCenter services" → "ApiCe").
+              'apice','microsof','azur',
             ]);
 
             function isPlausiblePropertyName(name) {
@@ -375,14 +380,23 @@ jobs:
             // proximity heuristic (MISS_NEAR_PROP), these require the user to
             // literally state that a specific property is missing.
             const EXPLICIT_MISSING_PROP_REGEXES = [
-              // "<X> property is missing" / "<X> property missing"
-              /\b([A-Za-z_][\w.-]*)\s+property\s+(?:is\s+|are\s+)?missing\b/i,
+              // "<X> property is missing" / "<X> property missing" / "<X> properties missing"
+              /\b([A-Za-z_][\w.-]*)\s+propert(?:y|ies)\s+(?:is\s+|are\s+)?missing\b/i,
               // "property <X> is missing"
               /\bproperty\s+["'`]?([A-Za-z_][\w.-]*)["'`]?\s+is\s+missing\b/i,
               // "missing property <X>" / "Missing property(s): <X>"
               /\bmissing\s+propert(?:y|ies)(?:\s*\(s\))?[\s:]+["'`]?([A-Za-z_][\w.-]*)["'`]?/i,
               // "is missing the <X> property"
               /\bis\s+missing\s+(?:the\s+)?["'`]?([A-Za-z_][\w.-]*)["'`]?\s+property\b/i,
+              // Inverted: "does not expose <X> property", "doesn't have <X> property",
+              // "type does not have a <X> property", "does not include <X>"
+              /\b(?:doesn['']?t|does\s+not|do\s+not|don['']?t)\s+(?:expose|include|have|contain|define|support)\s+(?:an?\s+|the\s+)?["'`]?([A-Za-z_][\w.-]*)["'`]?\s+propert/i,
+              // "type definition does not expose (a|the) <X>"
+              /\btype\s+(?:definition\s+)?(?:doesn['']?t|does\s+not)\s+(?:expose|include|have|contain|define)\s+(?:an?\s+|the\s+)?["'`]?([A-Za-z_][\w.-]*)["'`]?\b/i,
+              // "lacks (a|the) <X> property" / "lacking <X>"
+              /\black(?:s|ing)?\s+(?:an?\s+|the\s+)?["'`]?([A-Za-z_][\w.-]*)["'`]?\s+propert/i,
+              // "no <X> property"
+              /\bno\s+["'`]?([A-Za-z_][\w.-]*)["'`]?\s+propert(?:y|ies)\b/i,
             ];
 
             // Language indicating "the type exists but its schema is wrong".
@@ -480,7 +494,10 @@ jobs:
               // "Missing property(s)", "Type is unavailable", "Type is incorrect",
               // and "Bug".
               const tmplIssueType = (() => {
-                const m = /###\s+Issue\s+Type\s*[\r\n]+\s*([^\r\n#]+)/i.exec(text);
+                // Accept both fenced form (### Issue Type\n\nValue) and inline
+                // form (### Issue Type Value) — GitHub bodies fetched via API
+                // sometimes get flattened onto a single line.
+                const m = /###\s+Issue\s+Type\b[\s:]*([^\r\n#]+?)(?=\s*(?:###|$|\r|\n))/i.exec(text);
                 if (!m) return null;
                 const v = m[1].trim().toLowerCase();
                 if (!v) return null;
