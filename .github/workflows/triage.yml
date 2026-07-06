@@ -785,50 +785,19 @@ jobs:
             }
 
             // --- Duplicate detection ---
-            // Rules:
-            //  - If the issue is `missing property` OR `type issue`: match on
-            //    same resource type + same property name (case-insensitive).
-            //  - Otherwise (bug / unclassified / anything else): require an
-            //    **exact error message** match — extract the primary error
-            //    signature (e.g. `Error BCP081: <msg>`, `Error: <msg>`) and
-            //    only flag when two issues share the same normalized signature.
+            // Only run for `missing property` or `type issue` categories,
+            // matching on same resource type + same property name (case-insensitive).
+            // For any other category (bug / unclassified / etc.) we do NOT dedupe —
+            // generic ARM errors like "deployment failed" produce too many false
+            // positives, and there's no reliable signature.
             // Only LABEL + COMMENT, never auto-close.
-            function extractErrorSignatures(text) {
-              if (!text) return [];
-              const out = [];
-              // BCP-coded diagnostics: "Error BCP081: Resource type ..." or "Warning BCP037: ..."
-              const bcpRe = /\b(?:Error|Warning)\s+BCP\d+\s*:\s*([^\r\n]+)/gi;
-              let m;
-              while ((m = bcpRe.exec(text)) !== null) out.push(m[1]);
-              // Generic "Error: <msg>" / "Error message: <msg>"
-              const errRe = /(?:^|[\r\n])\s*(?:Error|error message)\s*[:\-]\s*([^\r\n]+)/gi;
-              while ((m = errRe.exec(text)) !== null) out.push(m[1]);
-              // ARM error blob: `"code": "...", "message": "<msg>"`
-              const armRe = /"message"\s*:\s*"([^"\r\n]{10,})"/g;
-              while ((m = armRe.exec(text)) !== null) out.push(m[1]);
-              // Normalize: lowercase, collapse whitespace, strip quotes/backticks,
-              // strip file paths + line/column numbers + API versions so the same
-              // error reported from two different Bicep files still matches.
-              const norm = s => s
-                .toLowerCase()
-                .replace(/["'`]/g, '')
-                .replace(/@\d{4}-\d{2}-\d{2}[\w-]*/g, '')
-                .replace(/\b\d+\b/g, '#')
-                .replace(/[\\\/][^\s()]+\.(?:bicep|json|yaml|yml)\b/g, '')
-                .replace(/\s+/g, ' ')
-                .trim();
-              // Dedupe within one issue
-              return [...new Set(out.map(norm).filter(s => s.length >= 15))];
-            }
-
             const isPropOrTypeIssue = cls.hasMissingPropertyLanguage || cls.hasTypeIssueLanguage;
-            const currentSigs = !isPropOrTypeIssue ? extractErrorSignatures(text) : [];
             let duplicateMatches = []; // array of { number, createdAt, reason }
             const currentTypesLower = new Set(cls.types.map(t => t.toLowerCase()));
-            const shouldCheckDupes = !alreadyTriaged && cls.types.length > 0 && (
-              (isPropOrTypeIssue && cls.propertyName) ||
-              (!isPropOrTypeIssue && currentSigs.length > 0)
-            );
+            const shouldCheckDupes = !alreadyTriaged &&
+              isPropOrTypeIssue &&
+              cls.types.length > 0 &&
+              cls.propertyName;
             if (shouldCheckDupes) {
               const allOpen = await github.paginate(github.rest.issues.listForRepo, {
                 owner, repo, state: 'open', per_page: 100,
@@ -839,29 +808,16 @@ jobs:
                 if (new Date(other.created_at) >= new Date(issue.created_at)) continue;
                 const otherText = `${other.title || ''}\n\n${other.body || ''}`;
                 const otherCls = classify(otherText, { title: other.title || '', body: other.body || '' });
+                if (!(otherCls.hasMissingPropertyLanguage || otherCls.hasTypeIssueLanguage)) continue;
                 const sharedType = otherCls.types.find(t => currentTypesLower.has(t.toLowerCase()));
                 if (!sharedType) continue;
-                if (isPropOrTypeIssue) {
-                  if (otherCls.propertyName &&
-                      otherCls.propertyName.toLowerCase() === cls.propertyName.toLowerCase()) {
-                    duplicateMatches.push({
-                      number: other.number,
-                      createdAt: other.created_at,
-                      reason: `same type \`${sharedType}\` and same property \`${cls.propertyName}\``,
-                    });
-                  }
-                } else {
-                  const otherSigs = extractErrorSignatures(otherText);
-                  const shared = currentSigs.find(s => otherSigs.includes(s));
-                  if (shared) {
-                    // Truncate the shared error for a readable reason string.
-                    const preview = shared.length > 120 ? shared.slice(0, 117) + '...' : shared;
-                    duplicateMatches.push({
-                      number: other.number,
-                      createdAt: other.created_at,
-                      reason: `same type \`${sharedType}\` and identical error message: "${preview}"`,
-                    });
-                  }
+                if (otherCls.propertyName &&
+                    otherCls.propertyName.toLowerCase() === cls.propertyName.toLowerCase()) {
+                  duplicateMatches.push({
+                    number: other.number,
+                    createdAt: other.created_at,
+                    reason: `same type \`${sharedType}\` and same property \`${cls.propertyName}\``,
+                  });
                 }
               }
               duplicateMatches.sort((a, b) => new Date(a.createdAt) - new Date(b.createdAt));
