@@ -872,6 +872,17 @@ jobs:
             // been folded into `missing property`.
             await removeLabelIf('types unavailable');
             if (!labelsToApply.has('type issue')) await removeLabelIf('type issue');
+            // Strip stale `possible-duplicate` when this issue's category no
+            // longer qualifies for dedupe (i.e. it's neither missing-property
+            // nor type-issue). If dedupe DID run and found nothing, also strip.
+            // Don't touch already-triaged prop/type issues where we skipped the
+            // dedupe scan — we don't know if the prior match still holds.
+            const shouldRemoveDupeLabel =
+              !isPropOrTypeIssue ||
+              (shouldCheckDupes && duplicateMatches.length === 0);
+            if (shouldRemoveDupeLabel && !labelsToApply.has('possible-duplicate')) {
+              await removeLabelIf('possible-duplicate');
+            }
 
             // --- Title normalization for confirmed missing-property issues ---
             if (cls.hasMissingPropertyLanguage && cls.propertyNames.length > 0 && cls.types.length > 0 &&
