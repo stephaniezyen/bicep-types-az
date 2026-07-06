@@ -365,6 +365,24 @@ jobs:
               /\bno\s+types\s+(?:available|defined|generated|published)\b/i,
               /\btypes?\s+(?:not\s+)?(?:yet\s+)?(?:generated|published|defined)\b/i,
               /\bmissing\s+(?:resource\s+)?type\s+definition\b/i,
+              // ARM runtime: "The resource type 'X' could not be found in the namespace 'Y'"
+              /\bresource\s+type\s+["'`][^"'`\n]+["'`]\s+could\s+not\s+be\s+found\s+in\s+the\s+namespace\b/i,
+              /\bcould\s+not\s+be\s+found\s+in\s+the\s+namespace\b/i,
+            ];
+
+            // Explicit "property is missing" phrases — used as a HIGH-CONFIDENCE
+            // signal for the missing-property classification. Unlike the loose
+            // proximity heuristic (MISS_NEAR_PROP), these require the user to
+            // literally state that a specific property is missing.
+            const EXPLICIT_MISSING_PROP_REGEXES = [
+              // "<X> property is missing" / "<X> property missing"
+              /\b([A-Za-z_][\w.-]*)\s+property\s+(?:is\s+|are\s+)?missing\b/i,
+              // "property <X> is missing"
+              /\bproperty\s+["'`]?([A-Za-z_][\w.-]*)["'`]?\s+is\s+missing\b/i,
+              // "missing property <X>" / "Missing property(s): <X>"
+              /\bmissing\s+propert(?:y|ies)(?:\s*\(s\))?[\s:]+["'`]?([A-Za-z_][\w.-]*)["'`]?/i,
+              // "is missing the <X> property"
+              /\bis\s+missing\s+(?:the\s+)?["'`]?([A-Za-z_][\w.-]*)["'`]?\s+property\b/i,
             ];
 
             // Language indicating "the type exists but its schema is wrong".
@@ -456,6 +474,24 @@ jobs:
                 .replace(/###\s+(?:Resource\s+Type|Api\s+Version|Bicep\s+Repro|Confirm|Other\s+Notes)\b/gi, ' ');
               const stripped = stripTemplate(text);
               const strippedNoCode = stripCode(stripped);
+              // -- Explicit user signal: the Azure issue template asks the user
+              // to pick an "Issue Type". If they set it, trust that value over
+              // the loose text heuristics. Values seen in practice include
+              // "Missing property(s)", "Type is unavailable", "Type is incorrect",
+              // and "Bug".
+              const tmplIssueType = (() => {
+                const m = /###\s+Issue\s+Type\s*[\r\n]+\s*([^\r\n#]+)/i.exec(text);
+                if (!m) return null;
+                const v = m[1].trim().toLowerCase();
+                if (!v) return null;
+                if (/\btype\s+is\s+unavailable\b/.test(v) ||
+                    /\btype\s+(?:not|un)available\b/.test(v)) return 'type-unavailable';
+                if (/\bmissing\s+propert/.test(v)) return 'missing-property';
+                if (/\btype\s+(?:is\s+)?(?:incorrect|wrong)\b/.test(v)) return 'type-issue';
+                if (/^bug\b/.test(v)) return 'bug';
+                return null;
+              })();
+
               // Layered extraction. Pass types so resource-type segments aren't
               // mistaken for property names. Always use the multi-layer extractor
               // so the error-pattern high-confidence path runs even when title
@@ -466,40 +502,61 @@ jobs:
                 types
               );
               const propertyName = propertyNames[0] || null;
-              // If we extracted a property purely via the inverted "X is not allowed" fallback,
-              // treat that as missing-property language even when MISS_NEAR_PROP didn't fire.
-              INVERTED_PHRASE_RE.lastIndex = 0;
-              let hasMP = MISS_NEAR_PROP.test(stripped) ||
-                (propertyNames.length > 0 && INVERTED_PHRASE_RE.test(stripped));
-              INVERTED_PHRASE_RE.lastIndex = 0;
-              // Resource-not-found / deployment-failure guard.
-              // If the body contains a strong "the resource is missing / deployment
-              // failed" signal AND the missing-property language only appears inside
-              // code blocks (i.e. it's quoted from an ARM error trace, not asserted
-              // by the user in prose), suppress missing-property classification.
-              // Important: check prose in BODY ONLY — the title may have been
-              // renamed by a prior triage run and would otherwise re-trigger itself.
-              if (hasMP && RESOURCE_NOT_FOUND_RE.test(stripped)) {
-                const bodyOnly = stripTemplate(body || '');
-                const bodyProse = stripCode(bodyOnly);
+
+              // Explicit missing-property signals:
+              //   1. Template `### Issue Type: Missing property(s)`
+              //   2. Error-message pattern `property "X" is not allowed on type "Y"`
+              //      (extractErrorPatterns yielded properties)
+              //   3. Literal phrase `<X> property is missing` / `Missing property <X>`
+              //      etc. in the prose (not inside code blocks)
+              const bodyProse = stripCode(stripTemplate(body || ''));
+              const errPat = extractErrorPatterns((title || '') + '\n' + (body || ''));
+              const hasExplicitMissingProp =
+                tmplIssueType === 'missing-property' ||
+                errPat.properties.length > 0 ||
+                EXPLICIT_MISSING_PROP_REGEXES.some(r => r.test(bodyProse)) ||
+                EXPLICIT_MISSING_PROP_REGEXES.some(r => r.test(title || ''));
+
+              let hasMP = hasExplicitMissingProp;
+              // Resource-not-found / deployment-failure guard still applies: even
+              // if we picked up an explicit phrase, an ARM "resource not found"
+              // trace with no user prose asserting the same is not a missing-prop
+              // report.
+              if (hasMP && RESOURCE_NOT_FOUND_RE.test(stripped) && tmplIssueType !== 'missing-property') {
                 const propLanguageInProse =
-                  MISS_NEAR_PROP.test(bodyProse) ||
-                  (propertyNames.length > 0 && INVERTED_PHRASE_RE.test(bodyProse));
-                INVERTED_PHRASE_RE.lastIndex = 0;
+                  EXPLICIT_MISSING_PROP_REGEXES.some(r => r.test(bodyProse)) ||
+                  errPat.properties.length > 0;
                 if (!propLanguageInProse) {
                   hasMP = false;
                 }
               }
+
+              // Template value takes precedence over heuristics for the
+              // type-unavailable / type-issue / bug categories too.
+              const hasTypeUnavail =
+                tmplIssueType === 'type-unavailable' ||
+                TYPE_UNAVAILABLE_REGEXES.some(r => r.test(stripped));
+              const hasTypeIssueRaw =
+                tmplIssueType === 'type-issue' ||
+                TYPE_ISSUE_REGEXES.some(r => r.test(stripped));
+              // Don't double-label: if it's clearly a type-unavailable issue,
+              // suppress the type-issue label (they're mutually exclusive).
+              const hasTypeIssue = hasTypeIssueRaw && !hasTypeUnavail;
+              const hasBug =
+                tmplIssueType === 'bug' ||
+                BUG_REGEXES.some(r => r.test(stripped));
+
               return {
                 rps: [...rpMap.values()],
                 types,
                 hasMissingPropertyLanguage: hasMP,
-                hasTypeIssueLanguage: TYPE_ISSUE_REGEXES.some(r => r.test(stripped)),
-                hasTypeUnavailableLanguage: TYPE_UNAVAILABLE_REGEXES.some(r => r.test(stripped)),
-                hasBugLanguage: BUG_REGEXES.some(r => r.test(stripped)),
+                hasTypeIssueLanguage: hasTypeIssue,
+                hasTypeUnavailableLanguage: hasTypeUnavail,
+                hasBugLanguage: hasBug,
                 propertyName,
                 propertyNames,
                 apiVersion: extractApiVersion(title, body),
+                templateIssueType: tmplIssueType,
               };
             }
 
