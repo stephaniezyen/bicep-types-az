@@ -749,7 +749,10 @@ jobs:
             }
 
             if (cls.hasTypeUnavailableLanguage) {
-              labelsToApply.add('types unavailable');
+              // Treat "type unavailable" (whole resource type missing) as the
+              // same taxonomy bucket as "missing property" — both are cases of
+              // Bicep types not exposing something the user needs.
+              labelsToApply.add('missing property');
             }
 
             if (cls.hasBugLanguage) {
@@ -841,7 +844,9 @@ jobs:
               await removeLabelIf('missing property');
               await removeLabelIf('property found');
             }
-            if (!labelsToApply.has('types unavailable')) await removeLabelIf('types unavailable');
+            // Always strip the deprecated `types unavailable` label — it's
+            // been folded into `missing property`.
+            await removeLabelIf('types unavailable');
             if (!labelsToApply.has('type issue')) await removeLabelIf('type issue');
 
             // --- Title normalization for confirmed missing-property issues ---
