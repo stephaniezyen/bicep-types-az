@@ -408,6 +408,11 @@ jobs:
               /\b(?:doesn['']?t|does\s+not|don['']?t|do\s+not)\s+(?:accept|allow)\b/i,
               /\bshould\s+(?:accept|allow)\b/i,
               /\brejects?\b[^\n]{0,40}?\b(?:string|int|integer|number|bool|boolean|array|value)\b/i,
+              // "expected a value of type X but the provided value is of type Y" —
+              // classic Bicep type-mismatch diagnostic.
+              /\bexpected\s+a?\s*value\s+of\s+type\b[^\n]{0,80}?\bprovided\s+value\s+is\s+of\s+type\b/i,
+              // Inline template value: "Inaccurate property type(s)"
+              /\binaccurate\s+propert(?:y|ies)?\s+type/i,
             ];
 
             // Language indicating a runtime/deployment bug (not a schema/type issue).
@@ -504,7 +509,8 @@ jobs:
                 if (/\btype\s+is\s+unavailable\b/.test(v) ||
                     /\btype\s+(?:not|un)available\b/.test(v)) return 'type-unavailable';
                 if (/\bmissing\s+propert/.test(v)) return 'missing-property';
-                if (/\btype\s+(?:is\s+)?(?:incorrect|wrong)\b/.test(v)) return 'type-issue';
+                if (/\btype\s+(?:is\s+)?(?:incorrect|wrong|inaccurate)\b/.test(v) ||
+                    /\binaccurate\s+propert(?:y|ies)?\s+type/.test(v)) return 'type-issue';
                 if (/^bug\b/.test(v)) return 'bug';
                 return null;
               })();
@@ -787,14 +793,15 @@ jobs:
             // --- Duplicate detection ---
             // Only run for `missing property` or `type issue` categories,
             // matching on same resource type + same property name (case-insensitive).
-            // For any other category (bug / unclassified / etc.) we do NOT dedupe —
-            // generic ARM errors like "deployment failed" produce too many false
-            // positives, and there's no reliable signature.
+            // Categories don't cross: a `missing property` issue only dupes
+            // against other `missing property` issues; a `type issue` only
+            // against other `type issue` issues.
+            // For any other category (bug / unclassified / etc.) we do NOT dedupe.
             // Only LABEL + COMMENT, never auto-close.
             const isPropOrTypeIssue = cls.hasMissingPropertyLanguage || cls.hasTypeIssueLanguage;
             let duplicateMatches = []; // array of { number, createdAt, reason }
             const currentTypesLower = new Set(cls.types.map(t => t.toLowerCase()));
-            const shouldCheckDupes = !alreadyTriaged &&
+            const shouldCheckDupes =
               isPropOrTypeIssue &&
               cls.types.length > 0 &&
               cls.propertyName;
@@ -808,7 +815,11 @@ jobs:
                 if (new Date(other.created_at) >= new Date(issue.created_at)) continue;
                 const otherText = `${other.title || ''}\n\n${other.body || ''}`;
                 const otherCls = classify(otherText, { title: other.title || '', body: other.body || '' });
-                if (!(otherCls.hasMissingPropertyLanguage || otherCls.hasTypeIssueLanguage)) continue;
+                // Must share the SAME category — don't cross MP ↔ type-issue.
+                const sameCategory =
+                  (cls.hasMissingPropertyLanguage && otherCls.hasMissingPropertyLanguage) ||
+                  (cls.hasTypeIssueLanguage && otherCls.hasTypeIssueLanguage);
+                if (!sameCategory) continue;
                 const sharedType = otherCls.types.find(t => currentTypesLower.has(t.toLowerCase()));
                 if (!sharedType) continue;
                 if (otherCls.propertyName &&
@@ -899,10 +910,11 @@ jobs:
             }
 
             // --- Comments ---
-            if (alreadyTriaged) {
-              core.info('Already triaged previously; skipping comments.');
-              return;
-            }
+            // Find any prior bot comment so we can update/delete instead of
+            // stacking duplicates on retrigger.
+            const priorBotComment = priorComments.find(c =>
+              c.user && c.user.type === 'Bot' && (c.body || '').includes(MARKER)
+            );
 
             const commentBlocks = [];
 
@@ -941,8 +953,9 @@ jobs:
               );
             }
 
-            // Acknowledgement comment on opened (only if no other comment was posted).
-            if (commentBlocks.length === 0 && action === 'opened') {
+            // Only post the acknowledgement on the FIRST triage (action=='opened'
+            // AND no prior bot comment). On retriggers, skip acknowledgement.
+            if (commentBlocks.length === 0 && action === 'opened' && !priorBotComment) {
               const lines = ['Thanks for the report! Auto-triage detected:', ''];
               if (primaryRps.length > 0) {
                 lines.push(`- **Resource provider${primaryRps.length > 1 ? 's' : ''}:** ` +
@@ -976,6 +989,24 @@ jobs:
 
             if (commentBlocks.length > 0) {
               const body = `${MARKER}\n` + commentBlocks.join('\n\n---\n\n');
-              await github.rest.issues.createComment({ owner, repo, issue_number: num, body });
-              core.info(`Posted ${commentBlocks.length} comment block(s).`);
+              if (priorBotComment) {
+                if ((priorBotComment.body || '').trim() === body.trim()) {
+                  core.info('Bot comment unchanged; skipping update.');
+                } else {
+                  await github.rest.issues.updateComment({
+                    owner, repo, comment_id: priorBotComment.id, body,
+                  });
+                  core.info(`Updated existing bot comment (${commentBlocks.length} block(s)).`);
+                }
+              } else {
+                await github.rest.issues.createComment({ owner, repo, issue_number: num, body });
+                core.info(`Posted ${commentBlocks.length} comment block(s).`);
+              }
+            } else if (priorBotComment) {
+              // Nothing to say anymore — delete the stale bot comment so
+              // outdated dupe lists / property-found warnings don't linger.
+              await github.rest.issues.deleteComment({
+                owner, repo, comment_id: priorBotComment.id,
+              });
+              core.info('Deleted stale bot comment (no comment blocks apply now).');
             }
