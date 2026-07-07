@@ -798,18 +798,17 @@ jobs:
             }
 
             // --- Duplicate detection ---
-            // Only run for `missing property` or `type issue` categories,
-            // matching on same resource type + same property name (case-insensitive).
-            // Categories don't cross: a `missing property` issue only dupes
-            // against other `missing property` issues; a `type issue` only
-            // against other `type issue` issues.
-            // For any other category (bug / unclassified / etc.) we do NOT dedupe.
+            // Only run for `missing property` issues, matching on same
+            // resource type + same property name (case-insensitive). Both the
+            // current issue AND every candidate original must be classified as
+            // `missing property` — we do NOT dedupe across categories, and we
+            // do NOT dedupe `type issue` reports (their signals are less
+            // uniform and cross-linking them creates false-positive threads).
             // Only LABEL + COMMENT, never auto-close.
-            const isPropOrTypeIssue = cls.hasMissingPropertyLanguage || cls.hasTypeIssueLanguage;
             let duplicateMatches = []; // array of { number, createdAt, reason }
             const currentTypesLower = new Set(cls.types.map(t => t.toLowerCase()));
             const shouldCheckDupes =
-              isPropOrTypeIssue &&
+              cls.hasMissingPropertyLanguage &&
               cls.types.length > 0 &&
               cls.propertyName;
             if (shouldCheckDupes) {
@@ -822,11 +821,7 @@ jobs:
                 if (new Date(other.created_at) >= new Date(issue.created_at)) continue;
                 const otherText = `${other.title || ''}\n\n${other.body || ''}`;
                 const otherCls = classify(otherText, { title: other.title || '', body: other.body || '' });
-                // Must share the SAME category — don't cross MP ↔ type-issue.
-                const sameCategory =
-                  (cls.hasMissingPropertyLanguage && otherCls.hasMissingPropertyLanguage) ||
-                  (cls.hasTypeIssueLanguage && otherCls.hasTypeIssueLanguage);
-                if (!sameCategory) continue;
+                if (!otherCls.hasMissingPropertyLanguage) continue;
                 const sharedType = otherCls.types.find(t => currentTypesLower.has(t.toLowerCase()));
                 if (!sharedType) continue;
                 if (otherCls.propertyName &&
@@ -891,12 +886,10 @@ jobs:
             await removeLabelIf('types unavailable');
             if (!labelsToApply.has('type issue')) await removeLabelIf('type issue');
             // Strip stale `possible-duplicate` when this issue's category no
-            // longer qualifies for dedupe (i.e. it's neither missing-property
-            // nor type-issue). If dedupe DID run and found nothing, also strip.
-            // Don't touch already-triaged prop/type issues where we skipped the
-            // dedupe scan — we don't know if the prior match still holds.
+            // longer qualifies for dedupe (i.e. it's not `missing property`).
+            // If dedupe DID run and found nothing, also strip.
             const shouldRemoveDupeLabel =
-              !isPropOrTypeIssue ||
+              !cls.hasMissingPropertyLanguage ||
               (shouldCheckDupes && duplicateMatches.length === 0);
             if (shouldRemoveDupeLabel && !labelsToApply.has('possible-duplicate')) {
               await removeLabelIf('possible-duplicate');
