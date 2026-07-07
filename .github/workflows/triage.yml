@@ -534,11 +534,18 @@ jobs:
               //      etc. in the prose (not inside code blocks)
               const bodyProse = stripCode(stripTemplate(body || ''));
               const errPat = extractErrorPatterns((title || '') + '\n' + (body || ''));
+              // Skip title-based EXPLICIT_MISSING_PROP_REGEXES matching when
+              // the title is the bot's canonical renamed format
+              // (`[<Microsoft.X/y>]: <props> propert(y|ies) missing`) — otherwise
+              // the auto-generated title feeds back into the classifier and
+              // spuriously labels type-issue reports as missing-property.
+              const isBotRenamedTitle =
+                /^\s*\[Microsoft\.[^\]]+\]:\s+[\w.,\s-]+\s+propert(?:y|ies)\s+missing\s*$/i.test(title || '');
               const hasExplicitMissingProp =
                 tmplIssueType === 'missing-property' ||
                 errPat.properties.length > 0 ||
                 EXPLICIT_MISSING_PROP_REGEXES.some(r => r.test(bodyProse)) ||
-                EXPLICIT_MISSING_PROP_REGEXES.some(r => r.test(title || ''));
+                (!isBotRenamedTitle && EXPLICIT_MISSING_PROP_REGEXES.some(r => r.test(title || '')));
 
               let hasMP = hasExplicitMissingProp;
               // Resource-not-found / deployment-failure guard still applies: even
