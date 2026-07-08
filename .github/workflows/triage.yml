@@ -910,8 +910,13 @@ jobs:
             }
 
             // --- Title normalization for confirmed missing-property issues ---
-            if (cls.hasMissingPropertyLanguage && cls.propertyNames.length > 0 && cls.types.length > 0 &&
-                !(propertyVerification && propertyVerification.found)) {
+            // Also runs when the current title is bot-canonical (we own it) so
+            // we can correct earlier noisy renames even after the docs check
+            // reclassifies the issue as `property found`.
+            const titleIsBotOwned = /^\s*\[Microsoft\.[^\]]+\]:\s+.+\s+propert(?:y|ies)\s+missing\s*$/i.test(issue.title || '');
+            if (cls.propertyNames.length > 0 && cls.types.length > 0 &&
+                (cls.hasMissingPropertyLanguage || titleIsBotOwned) &&
+                !(propertyVerification && propertyVerification.found && !titleIsBotOwned)) {
               const propsForTitle = cls.propertyNames.slice(0, 3).join(', ');
               const wordForm = cls.propertyNames.length > 1 ? 'properties' : 'property';
               const normalizedTitle = `[${cls.types[0]}]: ${propsForTitle} ${wordForm} missing`;
