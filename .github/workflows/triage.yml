@@ -293,6 +293,10 @@ jobs:
                 /unknown\s+property\s+["'`]\**([A-Za-z_][\w.-]*)\**["'`]\s+(?:on|for)\s+(?:type\s+)?["'`]\**([A-Za-z_][\w.-]*)\**["'`]/gi,
                 // "property 'X' not found on (type) 'Y'"
                 /property\s+["'`]\**([A-Za-z_][\w.-]*)\**["'`]\s+(?:not\s+found|does\s+not\s+exist)\s+on\s+(?:type\s+)?["'`]\**([A-Za-z_][\w.-]*)\**["'`]/gi,
+                // "`X` property of (type) `Y`" — user quoting property + its container type
+                /["'`]\**([A-Za-z_][\w.-]*)\**["'`]\s+property\s+of\s+(?:type\s+)?["'`]\**([A-Za-z_][\w.-]*)\**["'`]/gi,
+                // "property `X` of (type) `Y`" — same, alternate word order
+                /property\s+["'`]\**([A-Za-z_][\w.-]*)\**["'`]\s+of\s+(?:type\s+)?["'`]\**([A-Za-z_][\w.-]*)\**["'`]/gi,
               ];
               for (const re of patterns) {
                 let m;
@@ -319,6 +323,11 @@ jobs:
                 const k = p.toLowerCase();
                 if (!seen.has(k)) { seen.add(k); out.push(p); }
               }
+              // High-confidence signal: if the error-pattern extractor found
+              // named properties, trust ONLY those. Don't augment with prose-
+              // mined identifiers that tend to pull noise words ("However",
+              // "Code", "Error") out of surrounding sentences.
+              if (out.length > 0) return out;
               const layers = [
                 stripTitlePrefix(title),
                 stripCode(body || ''),
