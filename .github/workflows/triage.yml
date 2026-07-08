@@ -646,10 +646,13 @@ jobs:
               }
             }
 
-            // Resolve a Microsoft.X/y resource type to the LATEST types.md that
-            // declares it. Returns { url, status, text, version } — or null text
-            // when no matching definition exists.
-            async function fetchDocsText(type) {
+            // Resolve a Microsoft.X/y resource type to the types.md that
+            // declares it. If preferVersion is provided, try that exact
+            // API version first (so we verify against the version the user
+            // is actually using). Fall back to the latest available.
+            // Returns { url, status, text, version } — or null text when no
+            // matching definition exists.
+            async function fetchDocsText(type, preferVersion) {
               const parts = type.split('/');
               if (parts.length < 2 || !/^Microsoft\./i.test(parts[0])) {
                 return { url: null, status: null, text: null };
@@ -677,6 +680,16 @@ jobs:
               // Sort by version descending (ISO date strings sort correctly);
               // '-preview' suffix sorts AFTER the bare date, so preview wins ties.
               all.sort((a, b) => b.v.localeCompare(a.v));
+              // If the user pinned an API version, try exact match first so we
+              // verify against what they're actually deploying.
+              if (preferVersion) {
+                const pv = preferVersion.toLowerCase();
+                const idx = all.findIndex(c => c.v.toLowerCase() === pv);
+                if (idx > 0) {
+                  const [pinned] = all.splice(idx, 1);
+                  all.unshift(pinned);
+                }
+              }
               const escType = type.replace(/[.*+?^${}()|[\]\\/]/g, '\\$&');
               const markerRe = new RegExp(`^## Resource ${escType}@`, 'im');
               for (const cand of all) {
@@ -688,6 +701,8 @@ jobs:
                   status: 200,
                   text: res.text,
                   version: cand.v,
+                  requestedVersion: preferVersion || null,
+                  versionMatched: preferVersion ? cand.v.toLowerCase() === preferVersion.toLowerCase() : null,
                 };
               }
               return { url: null, status: 404, text: null };
@@ -839,8 +854,8 @@ jobs:
             let propertyVerification = null;
             if (cls.hasMissingPropertyLanguage && cls.propertyNames.length > 0 && cls.types.length > 0) {
               const t = cls.types[0];
-              const docs = await fetchDocsText(t);
-              core.info(`Types fetch for ${t}: status=${docs.status} version=${docs.version || 'n/a'} length=${docs.text ? docs.text.length : 0}`);
+              const docs = await fetchDocsText(t, cls.apiVersion);
+              core.info(`Types fetch for ${t} (requested=${cls.apiVersion || 'n/a'}): status=${docs.status} resolved=${docs.version || 'n/a'} matched=${docs.versionMatched} length=${docs.text ? docs.text.length : 0}`);
               if (docs.text) {
                 const results = cls.propertyNames.map(n => ({ name: n, found: pageHasWord(docs.text, n) }));
                 const allFound = results.every(r => r.found);
@@ -849,6 +864,8 @@ jobs:
                   url: docs.url,
                   type: t,
                   version: docs.version || null,
+                  requestedVersion: docs.requestedVersion || null,
+                  versionMatched: docs.versionMatched,
                   property: cls.propertyName, // first one, back-compat
                   results,
                 };
@@ -1016,7 +1033,14 @@ jobs:
             // "Property found in generated types" comment (contradiction).
             if (propertyVerification && propertyVerification.found) {
               const list = propertyVerification.results.map(r => `\`${r.name}\``).join(', ');
-              const verLabel = propertyVerification.version ? ` (API version \`${propertyVerification.version}\`)` : '';
+              const rv = propertyVerification.requestedVersion;
+              const v = propertyVerification.version;
+              let verLabel = v ? ` (API version \`${v}\`)` : '';
+              if (rv && v && rv.toLowerCase() !== v.toLowerCase()) {
+                verLabel = ` (couldn't find API version \`${rv}\`; checked \`${v}\` instead)`;
+              } else if (rv && v && rv.toLowerCase() === v.toLowerCase()) {
+                verLabel = ` (API version \`${v}\`, matching the one you referenced)`;
+              }
               commentBlocks.push(
                 `I checked the [Azure/bicep-types-az](https://github.com/${TYPES_REPO}) generated type ` +
                 `definitions for **\`${propertyVerification.type}\`**${verLabel} and found the ` +
