@@ -22,7 +22,9 @@ jobs:
         with:
           script: |
             const MARKER = '<!-- auto-triage-bot:v3 -->';
-            const DOCS_BASE = 'https://learn.microsoft.com/en-us/azure/templates';
+            const TYPES_REPO = 'Azure/bicep-types-az';
+            const TYPES_BRANCH = 'main';
+            const RAW_BASE = `https://raw.githubusercontent.com/${TYPES_REPO}/${TYPES_BRANCH}/generated`;
             const UA = 'bicep-types-az-triage-bot/3.0';
 
             // PascalCase Microsoft.<Namespace> — case-sensitive to avoid matching
@@ -596,26 +598,99 @@ jobs:
               };
             }
 
-            // Fetch the full docs page text for property-name verification.
-            async function fetchDocsText(type) {
-              const url = `${DOCS_BASE}/${type.toLowerCase()}`;
+            // --- Property verification via Azure/bicep-types-az generated types.md ---
+            // Cache directory listings so we don't refetch across property lookups.
+            const generatedListCache = { promise: null };
+            const dirCache = new Map();
+            async function listGenerated() {
+              if (!generatedListCache.promise) {
+                generatedListCache.promise = (async () => {
+                  try {
+                    const res = await github.request(
+                      `GET /repos/${TYPES_REPO}/contents/generated?ref=${TYPES_BRANCH}`,
+                      { headers: { 'user-agent': UA } }
+                    );
+                    return res.data.map(e => e.name);
+                  } catch (e) {
+                    core.warning(`listGenerated failed: ${e.message}`);
+                    return [];
+                  }
+                })();
+              }
+              return generatedListCache.promise;
+            }
+            async function listContents(path) {
+              if (dirCache.has(path)) return dirCache.get(path);
+              const p = (async () => {
+                try {
+                  const res = await github.request(
+                    `GET /repos/${TYPES_REPO}/contents/${path}?ref=${TYPES_BRANCH}`,
+                    { headers: { 'user-agent': UA } }
+                  );
+                  return res.data.map(e => ({ name: e.name, type: e.type }));
+                } catch (e) {
+                  return [];
+                }
+              })();
+              dirCache.set(path, p);
+              return p;
+            }
+            async function fetchTypesMd(folder, ns, version) {
+              const url = `${RAW_BASE}/${folder}/${ns}/${version}/types.md`;
               try {
-                const res = await fetch(url, { redirect: 'follow', headers: { 'User-Agent': UA } });
+                const res = await fetch(url, { headers: { 'User-Agent': UA } });
                 if (!res.ok) return { url, status: res.status, text: null };
-                const html = await res.text();
-                const text = html
-                  .replace(/<script[\s\S]*?<\/script>/gi, ' ')
-                  .replace(/<style[\s\S]*?<\/style>/gi, ' ')
-                  .replace(/<[^>]+>/g, ' ')
-                  .replace(/&nbsp;/g, ' ').replace(/&amp;/g, '&')
-                  .replace(/&lt;/g, '<').replace(/&gt;/g, '>')
-                  .replace(/&quot;/g, '"').replace(/&#39;/g, "'")
-                  .replace(/\s+/g, ' ')
-                  .trim();
-                return { url, status: res.status, text };
+                return { url, status: res.status, text: await res.text() };
               } catch (e) {
                 return { url, status: null, text: null, error: e.message };
               }
+            }
+
+            // Resolve a Microsoft.X/y resource type to the LATEST types.md that
+            // declares it. Returns { url, status, text, version } — or null text
+            // when no matching definition exists.
+            async function fetchDocsText(type) {
+              const parts = type.split('/');
+              if (parts.length < 2 || !/^Microsoft\./i.test(parts[0])) {
+                return { url: null, status: null, text: null };
+              }
+              const namespace = parts[0].toLowerCase(); // microsoft.containerregistry
+              const slug = namespace.replace(/^microsoft\./, ''); // containerregistry
+              const generated = await listGenerated();
+              const slugRe = new RegExp(`^${slug.replace(/[.*+?^${}()|[\\]\\\\]/g, '\\$&')}(_\\d+)?$`);
+              const candidates = generated.filter(n => slugRe.test(n));
+              if (!candidates.length) {
+                return { url: null, status: 404, text: null };
+              }
+              // Collect every (folder, nsDir, version) triple across candidate folders.
+              const all = [];
+              for (const folder of candidates) {
+                const entries = await listContents(folder);
+                const nsDir = entries.find(e => e.type === 'dir' && e.name.toLowerCase() === namespace);
+                if (!nsDir) continue;
+                const versions = await listContents(`${folder}/${nsDir.name}`);
+                for (const v of versions) {
+                  if (v.type === 'dir') all.push({ folder, nsDir: nsDir.name, v: v.name });
+                }
+              }
+              if (!all.length) return { url: null, status: 404, text: null };
+              // Sort by version descending (ISO date strings sort correctly);
+              // '-preview' suffix sorts AFTER the bare date, so preview wins ties.
+              all.sort((a, b) => b.v.localeCompare(a.v));
+              const escType = type.replace(/[.*+?^${}()|[\]\\/]/g, '\\$&');
+              const markerRe = new RegExp(`^## Resource ${escType}@`, 'im');
+              for (const cand of all) {
+                const res = await fetchTypesMd(cand.folder, cand.nsDir, cand.v);
+                if (!res.text) continue;
+                if (!markerRe.test(res.text)) continue;
+                return {
+                  url: `https://github.com/${TYPES_REPO}/blob/${TYPES_BRANCH}/generated/${cand.folder}/${cand.nsDir}/${cand.v}/types.md`,
+                  status: 200,
+                  text: res.text,
+                  version: cand.v,
+                };
+              }
+              return { url: null, status: 404, text: null };
             }
 
             // Case-insensitive whole-word search.
@@ -759,13 +834,13 @@ jobs:
               c.user && c.user.type === 'Bot' && (c.body || '').includes(MARKER)
             );
 
-            // --- Property verification against docs (only when we have named properties + a type) ---
-            // propertyVerification: { found: bool, url, type, property, results: [{name, found}] }
+            // --- Property verification against generated types (only when we have named properties + a type) ---
+            // propertyVerification: { found: bool, url, type, version, property, results: [{name, found}] }
             let propertyVerification = null;
             if (cls.hasMissingPropertyLanguage && cls.propertyNames.length > 0 && cls.types.length > 0) {
               const t = cls.types[0];
               const docs = await fetchDocsText(t);
-              core.info(`Docs fetch for ${t}: status=${docs.status} length=${docs.text ? docs.text.length : 0}`);
+              core.info(`Types fetch for ${t}: status=${docs.status} version=${docs.version || 'n/a'} length=${docs.text ? docs.text.length : 0}`);
               if (docs.text) {
                 const results = cls.propertyNames.map(n => ({ name: n, found: pageHasWord(docs.text, n) }));
                 const allFound = results.every(r => r.found);
@@ -773,10 +848,11 @@ jobs:
                   found: allFound,
                   url: docs.url,
                   type: t,
+                  version: docs.version || null,
                   property: cls.propertyName, // first one, back-compat
                   results,
                 };
-                core.info(`Property check for ${t}: ${results.map(r => `${r.name}=${r.found}`).join(', ')}`);
+                core.info(`Property check for ${t}@${docs.version}: ${results.map(r => `${r.name}=${r.found}`).join(', ')}`);
               }
             }
 
@@ -937,12 +1013,14 @@ jobs:
 
             const commentBlocks = [];
 
-            // "Property found in docs" comment (contradiction).
+            // "Property found in generated types" comment (contradiction).
             if (propertyVerification && propertyVerification.found) {
               const list = propertyVerification.results.map(r => `\`${r.name}\``).join(', ');
+              const verLabel = propertyVerification.version ? ` (API version \`${propertyVerification.version}\`)` : '';
               commentBlocks.push(
-                `I checked the Azure template docs for **\`${propertyVerification.type}\`** and found ` +
-                `the propert${propertyVerification.results.length > 1 ? 'ies' : 'y'} ${list} documented:\n\n` +
+                `I checked the [Azure/bicep-types-az](https://github.com/${TYPES_REPO}) generated type ` +
+                `definitions for **\`${propertyVerification.type}\`**${verLabel} and found the ` +
+                `propert${propertyVerification.results.length > 1 ? 'ies' : 'y'} ${list} defined:\n\n` +
                 `${propertyVerification.url}\n\n` +
                 `Could you double-check spelling and the API version you're targeting? ` +
                 `If the property is working for you, feel free to close.`
