@@ -946,17 +946,9 @@ jobs:
               );
             }
 
-            // Clarification request when type-issue / missing-property language is present
-            // but no specific property name was extracted.
-            if (needsPropertyClarification) {
-              const kind = cls.hasMissingPropertyLanguage ? 'missing-property' : 'type';
-              commentBlocks.push(
-                `Could you clarify **which specific property** is affected? ` +
-                `I detected ${kind}-issue language but couldn't identify a property name from the title or body, ` +
-                `so I can't check the docs or look for duplicates without more detail. ` +
-                `Including the property name in backticks (e.g. \`\`\`propertyName\`\`\`) helps the bot pick it up.`
-              );
-            }
+            // (Clarification-request comment removed — was too noisy and
+            // triggered on every issue where the classifier couldn't extract
+            // a property name, even when the issue itself was already clear.)
 
             // Only post the acknowledgement on the FIRST triage (action=='opened'
             // AND no prior bot comment). On retriggers, skip acknowledgement.
