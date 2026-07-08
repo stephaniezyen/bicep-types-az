@@ -665,10 +665,10 @@ jobs:
               // Collect every (folder, nsDir, version) triple across candidate folders.
               const all = [];
               for (const folder of candidates) {
-                const entries = await listContents(folder);
+                const entries = await listContents(`generated/${folder}`);
                 const nsDir = entries.find(e => e.type === 'dir' && e.name.toLowerCase() === namespace);
                 if (!nsDir) continue;
-                const versions = await listContents(`${folder}/${nsDir.name}`);
+                const versions = await listContents(`generated/${folder}/${nsDir.name}`);
                 for (const v of versions) {
                   if (v.type === 'dir') all.push({ folder, nsDir: nsDir.name, v: v.name });
                 }
