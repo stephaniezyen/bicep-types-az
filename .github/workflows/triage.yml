@@ -958,15 +958,19 @@ jobs:
                 lines.push(`- **Resource provider${primaryRps.length > 1 ? 's' : ''}:** ` +
                   primaryRps.map(r => `\`${r}\``).join(', '));
               }
-              const primaryTypes = (titleNonWrapperTypes.length > 0
-                ? titleNonWrapperTypes
-                : (bodyNonWrapperTypes.length > 0 ? bodyNonWrapperTypes : cls.types));
-              if (primaryTypes.length > 0) {
-                lines.push(`- **Type${primaryTypes.length > 1 ? 's' : ''}:** ` +
-                  primaryTypes.map(t => `\`${t}\``).join(', '));
-              }
-              if (cls.apiVersion) {
-                lines.push(`- **API version:** \`${cls.apiVersion}\``);
+              // Only include the type when the issue is missing-property or type-issue —
+              // for other categories the type isn't the interesting signal.
+              if (cls.hasMissingPropertyLanguage || cls.hasTypeIssueLanguage) {
+                const primaryTypes = (titleNonWrapperTypes.length > 0
+                  ? titleNonWrapperTypes
+                  : (bodyNonWrapperTypes.length > 0 ? bodyNonWrapperTypes : cls.types));
+                if (primaryTypes.length > 0) {
+                  lines.push(`- **Type${primaryTypes.length > 1 ? 's' : ''}:** ` +
+                    primaryTypes.map(t => `\`${t}\``).join(', '));
+                }
+                if (cls.apiVersion) {
+                  lines.push(`- **API version:** \`${cls.apiVersion}\``);
+                }
               }
               if (cls.hasTypeIssueLanguage) {
                 lines.push(`- Labeled \`type issue\` based on language about the type being wrong or unavailable.`);
@@ -979,7 +983,6 @@ jobs:
                   (cls.propertyName ? ` (extracted property: \`${cls.propertyName}\`)` : '') + `.`);
               }
               if (lines.length > 2) {
-                lines.push('', 'A maintainer will follow up.');
                 commentBlocks.push(lines.join('\n'));
               }
             }
