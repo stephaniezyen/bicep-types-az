@@ -1067,6 +1067,7 @@ jobs:
             // been folded into `missing property`.
             await removeLabelIf('types unavailable');
             if (!labelsToApply.has('type issue')) await removeLabelIf('type issue');
+            if (!labelsToApply.has('bug')) await removeLabelIf('bug');
             // Strip stale `possible-duplicate` when this issue's category no
             // longer qualifies for dedupe (i.e. it's neither missing-property
             // nor type-issue). If dedupe DID run and found nothing, also strip.
