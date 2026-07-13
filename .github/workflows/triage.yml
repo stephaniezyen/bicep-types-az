@@ -644,15 +644,16 @@ jobs:
                 BUG_REGEXES.some(r => r.test(stripped));
 
               // Definitively-bug wording (language-limitation cues like
-              // wanting to loop through an array or `[for x in y]` inside a
-              // property value) overrides schema-shaped classifications. When
-              // any of these fires, force `bug` and suppress
-              // type-issue / type-unavailable / missing-property.
+              // wanting to loop through an array) suppresses schema-shaped
+              // classifications so we don't mislabel language limitations as
+              // type-issue / type-unavailable / missing-property. We do NOT
+              // auto-apply the `bug` label from these cues alone — bug
+              // classification still requires an explicit BUG_REGEXES match or
+              // the template value.
               const hasDefinitivelyBug =
                 DEFINITIVELY_BUG_REGEXES.some(r => r.test(bodyProse)) ||
                 DEFINITIVELY_BUG_REGEXES.some(r => r.test(title || ''));
               if (hasDefinitivelyBug) {
-                hasBug = true;
                 hasMP = false;
                 hasTypeIssue = false;
                 hasTypeUnavail = false;
