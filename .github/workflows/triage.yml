@@ -473,6 +473,30 @@ jobs:
               /\bintermittent(?:ly)?\s+(?:fail|fails|failing|breaks|errors)\b/i,
             ];
 
+            // A subset of BUG signals whose wording is so unambiguous that the
+            // classifier treats them as an OVERRIDE — the user's real problem
+            // is a Bicep/ARM language limitation (typically wanting to loop
+            // over an array or dynamically expand element keys), not a schema
+            // defect. When any of these match, we force `bug` and suppress
+            // type-issue / type-unavailable / missing-property labels.
+            const DEFINITIVELY_BUG_REGEXES = [
+              // "loop through the array" / "loop over each identity"
+              /\bloop\s+(?:through|over|across)\b/i,
+              // "iterate through the array"
+              /\biterat(?:e|ing)\s+(?:through|over|across)\b/i,
+              // Bicep `for-expression` used as a noun
+              /\bfor[-\s]expression\b/i,
+              // "doesn't scale well" / "not scalable" (design/language limitation)
+              /\b(?:doesn['']?t|does\s+not|won['']?t|will\s+not)\s+scale\s+(?:well|nicely)?\b/i,
+              /\bnot\s+scalable\b/i,
+              // Explicit `[for X in Y: ...]` Bicep loop syntax the user is
+              // trying to use inside a property value.
+              /\[\s*for\s+[A-Za-z_]\w*\s+in\s+/i,
+              // "flexible number of X" / "dynamic list of X" / "variable number of X"
+              // — these describe a language-feature wish, not a schema issue.
+              /\b(?:flexible|dynamic|variable|arbitrary)\s+(?:number|count|list|set)\s+of\b/i,
+            ];
+
             function normalizeNs(raw) {
               const suffix = raw.slice('Microsoft.'.length);
               const uniform = suffix === suffix.toLowerCase() || suffix === suffix.toUpperCase();
@@ -605,7 +629,7 @@ jobs:
 
               // Template value takes precedence over heuristics for the
               // type-unavailable / type-issue / bug categories too.
-              const hasTypeUnavail =
+              let hasTypeUnavail =
                 tmplIssueType === 'type-unavailable' ||
                 TYPE_UNAVAILABLE_REGEXES.some(r => r.test(stripped));
               // Definitively-missing wording (e.g. the Bicep linter phrase
@@ -617,13 +641,28 @@ jobs:
                 DEFINITIVELY_MISSING_REGEXES.some(r => r.test(bodyProse)) ||
                 DEFINITIVELY_MISSING_REGEXES.some(r => r.test(title || ''));
               if (hasDefinitivelyMissing) hasMP = true;
-              const hasTypeIssue =
+              let hasTypeIssue =
                 !hasDefinitivelyMissing &&
                 (tmplIssueType === 'type-issue' ||
                  TYPE_ISSUE_REGEXES.some(r => r.test(stripped)));
-              const hasBug =
+              let hasBug =
                 tmplIssueType === 'bug' ||
                 BUG_REGEXES.some(r => r.test(stripped));
+
+              // Definitively-bug wording (language-limitation cues like
+              // wanting to loop through an array or `[for x in y]` inside a
+              // property value) overrides schema-shaped classifications. When
+              // any of these fires, force `bug` and suppress
+              // type-issue / type-unavailable / missing-property.
+              const hasDefinitivelyBug =
+                DEFINITIVELY_BUG_REGEXES.some(r => r.test(bodyProse)) ||
+                DEFINITIVELY_BUG_REGEXES.some(r => r.test(title || ''));
+              if (hasDefinitivelyBug) {
+                hasBug = true;
+                hasMP = false;
+                hasTypeIssue = false;
+                hasTypeUnavail = false;
+              }
 
               return {
                 rps: [...rpMap.values()],
