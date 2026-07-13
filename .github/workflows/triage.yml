@@ -330,6 +330,21 @@ jobs:
               // mined identifiers that tend to pull noise words ("However",
               // "Code", "Error") out of surrounding sentences.
               if (out.length > 0) return out;
+              // Definitively-missing linter/ARM phrases (e.g. `The property
+              // "identity" does not exist in the resource or type definition`)
+              // are equally trustworthy — return ONLY the captured names when
+              // present, skipping the noisier prose layers.
+              for (const re of DEFINITIVELY_MISSING_REGEXES) {
+                const rg = new RegExp(re.source, re.flags.includes('g') ? re.flags : re.flags + 'g');
+                let m;
+                while ((m = rg.exec(fullText)) !== null) {
+                  const p = m[1];
+                  if (!p) continue;
+                  const k = p.toLowerCase();
+                  if (!seen.has(k)) { seen.add(k); out.push(p); }
+                }
+              }
+              if (out.length > 0) return out;
               const layers = [
                 stripTitlePrefix(title),
                 stripCode(body || ''),
@@ -408,6 +423,22 @@ jobs:
               /\black(?:s|ing)?\s+(?:an?\s+|the\s+)?["'`]?([A-Za-z_][\w.-]*)["'`]?\s+propert/i,
               // "no <X> property"
               /\bno\s+["'`]?([A-Za-z_][\w.-]*)["'`]?\s+propert(?:y|ies)\b/i,
+              // Bicep linter diagnostic: `The property "X" does not exist in the
+              // resource or type definition, although it might still be valid.`
+              // (Also matches "in the resource type definition" / "in the type
+              // definition" variants that appear in older tooling output.)
+              /\bproperty\s+["'`]([A-Za-z_][\w.-]*)["'`]\s+does\s+not\s+exist\s+in\s+the\s+(?:resource\s+(?:or\s+type\s+)?|type\s+)?definition\b/i,
+            ];
+
+            // A subset of EXPLICIT_MISSING_PROP_REGEXES whose wording is so
+            // unambiguous that the classifier treats them as an OVERRIDE — i.e.
+            // the issue is missing-property even when the reporter picked
+            // "Inaccurate property type(s)" (or another type-issue phrasing) in
+            // the issue template. These are literal error messages emitted by
+            // Bicep / ARM saying the property is not defined, not messages
+            // about a property having the wrong type.
+            const DEFINITIVELY_MISSING_REGEXES = [
+              /\bproperty\s+["'`]([A-Za-z_][\w.-]*)["'`]\s+does\s+not\s+exist\s+in\s+the\s+(?:resource\s+(?:or\s+type\s+)?|type\s+)?definition\b/i,
             ];
 
             // Language indicating "the type exists but its schema is wrong".
@@ -577,9 +608,19 @@ jobs:
               const hasTypeUnavail =
                 tmplIssueType === 'type-unavailable' ||
                 TYPE_UNAVAILABLE_REGEXES.some(r => r.test(stripped));
+              // Definitively-missing wording (e.g. the Bicep linter phrase
+              // `The property "X" does not exist in the resource or type
+              // definition`) is a strong overriding signal: reclassify as
+              // missing-property and suppress the type-issue label even if the
+              // reporter picked "Inaccurate property type(s)" in the template.
+              const hasDefinitivelyMissing =
+                DEFINITIVELY_MISSING_REGEXES.some(r => r.test(bodyProse)) ||
+                DEFINITIVELY_MISSING_REGEXES.some(r => r.test(title || ''));
+              if (hasDefinitivelyMissing) hasMP = true;
               const hasTypeIssue =
-                tmplIssueType === 'type-issue' ||
-                TYPE_ISSUE_REGEXES.some(r => r.test(stripped));
+                !hasDefinitivelyMissing &&
+                (tmplIssueType === 'type-issue' ||
+                 TYPE_ISSUE_REGEXES.some(r => r.test(stripped)));
               const hasBug =
                 tmplIssueType === 'bug' ||
                 BUG_REGEXES.some(r => r.test(stripped));
