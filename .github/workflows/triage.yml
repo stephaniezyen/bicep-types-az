@@ -489,12 +489,6 @@ jobs:
               // "doesn't scale well" / "not scalable" (design/language limitation)
               /\b(?:doesn['']?t|does\s+not|won['']?t|will\s+not)\s+scale\s+(?:well|nicely)?\b/i,
               /\bnot\s+scalable\b/i,
-              // Explicit `[for X in Y: ...]` Bicep loop syntax the user is
-              // trying to use inside a property value.
-              /\[\s*for\s+[A-Za-z_]\w*\s+in\s+/i,
-              // "flexible number of X" / "dynamic list of X" / "variable number of X"
-              // — these describe a language-feature wish, not a schema issue.
-              /\b(?:flexible|dynamic|variable|arbitrary)\s+(?:number|count|list|set)\s+of\b/i,
             ];
 
             function normalizeNs(raw) {
