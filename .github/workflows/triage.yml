@@ -314,6 +314,39 @@ jobs:
               return { properties, containerTypes };
             }
 
+            // Extract property names from a structured "properties:" list in
+            // prose — e.g. a user writing:
+            //     properties:
+            //       parameterValueType
+            //       alternativeParameterValues
+            // Only identifiers indented UNDER a bare `properties:` header are
+            // returned; siblings at or above the header indent (like a
+            // top-level `kind`) are ignored. High-confidence: this shorthand
+            // enumerates exactly the properties the reporter means.
+            function extractIndentedPropertyList(text) {
+              if (!text) return [];
+              const lines = text.split(/\r?\n/);
+              const out = [];
+              const seen = new Set();
+              for (let i = 0; i < lines.length; i++) {
+                const head = /^(\s*)properties\s*:\s*$/i.exec(lines[i]);
+                if (!head) continue;
+                const headIndent = head[1].length;
+                for (let j = i + 1; j < lines.length; j++) {
+                  const line = lines[j];
+                  if (/^\s*$/.test(line)) break;                 // blank line ends block
+                  const item = /^(\s*)(?:[-*]\s+)?([A-Za-z_][\w.-]*)\s*(?::.*)?$/.exec(line);
+                  if (!item) break;                              // non-item line ends block
+                  if (item[1].length <= headIndent) break;       // not nested under header
+                  const name = item[2];
+                  if (!isPlausiblePropertyName(name)) continue;
+                  const k = name.toLowerCase();
+                  if (!seen.has(k)) { seen.add(k); out.push(name); }
+                }
+              }
+              return out;
+            }
+
             // Returns ALL plausible property names found across layers (deduped),
             // preserving the precedence: title-layer candidates first.
             function extractAllMissingProperties(title, body, types) {
@@ -347,6 +380,17 @@ jobs:
                   const k = p.toLowerCase();
                   if (!seen.has(k)) { seen.add(k); out.push(p); }
                 }
+              }
+              if (out.length > 0) return out;
+              // Structured "properties:" list in prose (indented enumeration)
+              // — e.g. `properties:` followed by indented `parameterValueType`
+              // / `alternativeParameterValues`. High confidence: return ONLY
+              // these, skipping the noisier prose layers that pull identifiers
+              // out of the surrounding Bicep repro.
+              const listed = extractIndentedPropertyList(stripCode(body || ''));
+              for (const p of listed) {
+                const k = p.toLowerCase();
+                if (!exclude.has(k) && !seen.has(k)) { seen.add(k); out.push(p); }
               }
               if (out.length > 0) return out;
               const layers = [
