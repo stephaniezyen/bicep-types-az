@@ -128,7 +128,7 @@ jobs:
               'webtests','networkinterfaces','components','registrations','registries','vaults',
               // Common English words that show up as sentence-starters or noise in
               // issue prose but are not property names.
-              'error','errors','based','however','additionally','note','notes',
+              'error','errors','based','however','additionally','note','notes','there','here',
               'example','examples','deployment','deployments','deploy','deployed','deploying',
               'trying','tried','using','used','set','setting','sets','using',
               'above','below','following','followed','after','before','during','while',
@@ -598,6 +598,7 @@ jobs:
               const types = [...typeMap.values()];
               const stripTemplate = s => s
                 .replace(/###\s+Issue\s+Type[\s\S]*?(?=###\s|$)/gi, ' ')
+                .replace(/_No\s+response_/gi, ' ')
                 .replace(/###\s+(?:Resource\s+Type|Api\s+Version|Bicep\s+Repro|Confirm|Other\s+Notes)\b/gi, ' ');
               const stripped = stripTemplate(text);
               const strippedNoCode = stripCode(stripped);
