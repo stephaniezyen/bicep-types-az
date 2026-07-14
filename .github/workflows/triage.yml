@@ -299,6 +299,10 @@ jobs:
                 /["'`]\**([A-Za-z_][\w.-]*)\**["'`]\s+property\s+of\s+(?:type\s+)?["'`]\**([A-Za-z_][\w.-]*)\**["'`]/gi,
                 // "property `X` of (type) `Y`" — same, alternate word order
                 /property\s+["'`]\**([A-Za-z_][\w.-]*)\**["'`]\s+of\s+(?:type\s+)?["'`]\**([A-Za-z_][\w.-]*)\**["'`]/gi,
+                // Bicep diagnostic code tied to a property: "raises BCP187 for
+                // `kind`", "BCP037 warning for `parameterValueType`". The BCP
+                // code makes this a high-confidence property reference.
+                /\bBCP\d+\b(?:\s+(?:warning|error))?\s+(?:for|on)\s+["'`]\**([A-Za-z_][\w.-]*)\**["'`]/gi,
               ];
               for (const re of patterns) {
                 let m;
