@@ -119,6 +119,9 @@ jobs:
               'type','types','resource','resources','definition','schema','api','for','of','on','in','from','with',
               'unrecognized','unsupported','allowed','permitted','recognized','supported','accepted','exposed',
               'value','values','string','strings','int','integer','number','bool','boolean','array',
+              // Literal values and common placeholder identifiers that are never
+              // property names.
+              'true','false','null','undefined','foo','bar','baz','qux','todo','xxx','yyy','zzz',
               'azure','microsoft','i','it','we','you','they','please','still','need','want',
               // Common tag/prefix words found in issue titles like "Test:", "Bug:", "Feature:".
               'test','tests','testing','bug','bugs','feature','fix','wip','draft','rfc','question','help',
@@ -149,6 +152,18 @@ jobs:
               if (/^\d+$/.test(name)) return false;
               // Must contain at least one letter.
               if (!/[A-Za-z]/.test(name)) return false;
+              // Reject markdown-emphasis / placeholder artifacts that begin or
+              // end with an underscore (e.g. "_No", "response_" from a stray
+              // `_No response_`, or "_New-AzDeployment"). Real ARM/Bicep
+              // property names never start or end with an underscore.
+              if (/^_|_$/.test(name)) return false;
+              // Reject truncated "Microsoft.X" namespace fragments that survive
+              // in stale bot-renamed titles — e.g. "soft.Web", "oft.Web",
+              // "t.App", "osoft.Network". These are a short all-lowercase run
+              // followed by a dot and a PascalCase segment, which no real
+              // property path produces (real dotted paths are camelCase, e.g.
+              // "properties.frontendIPConfigurations").
+              if (/^[a-z]{1,6}\.[A-Z]/.test(name)) return false;
               return true;
             }
             function isLikelyIdentifier(name) {
@@ -204,12 +219,32 @@ jobs:
                 let qm;
                 QUOTED_IDENT.lastIndex = 0;
                 while ((qm = QUOTED_IDENT.exec(window)) !== null) {
+                  // Even quoted tokens must start lowercase to be a property
+                  // name/key. Quoted PascalCase tokens are enum string VALUES
+                  // (e.g. `type: 'SystemAssigned'`, `sku: 'Standard'`) or ARM
+                  // JSON PascalCase keys — not the Bicep camelCase property.
+                  if (!/^[a-z]/.test(qm[1])) continue;
                   addCandidate(qm[1], winStart + qm.index, true);
                 }
                 let cm;
                 CAMEL_IDENT.lastIndex = 0;
                 while ((cm = CAMEL_IDENT.exec(window)) !== null) {
+                  // Reject matches truncated by the window slice: if the match
+                  // butts up against a window edge that isn't the true start/end
+                  // of the text, it's a partial word (e.g. "Microsoft" → "oft" or
+                  // "Whenever" → "Whe") and must be discarded.
+                  if (cm.index === 0 && winStart > 0) continue;
+                  if (cm.index + cm[0].length === window.length && winEnd < text.length) continue;
                   if (!isLikelyIdentifier(cm[1])) continue;
+                  // Unquoted prose candidates must look like a real ARM/Bicep
+                  // property reference, which is camelCase starting with a
+                  // lowercase letter (optionally a dotted path like
+                  // `properties.fooBar`). PascalCase / ALL-CAPS bare tokens are
+                  // almost always type names, enum VALUES (e.g. "SystemAssigned",
+                  // "Standard"), acronyms ("CPU", from "VS Code" → "Code"), or
+                  // sentence-leading English words ("Thanks", "Redirect") — not
+                  // property names. Quoted candidates bypass this (handled above).
+                  if (!/^[a-z]/.test(cm[1])) continue;
                   addCandidate(cm[1], winStart + cm.index, false);
                 }
               }
@@ -628,6 +663,15 @@ jobs:
               // mistaken for property names. Always use the multi-layer extractor
               // so the error-pattern high-confidence path runs even when title
               // is missing.
+              // Detect the bot's own canonical renamed title
+              // (`[Microsoft.X/y]: <props> propert(y|ies) missing`). Used below
+              // by the classification logic. Note: we STILL mine the title for
+              // property names — the extraction filters (truncation guard,
+              // lowercase-first rule, stopwords, namespace-fragment rejection)
+              // clean any stale noise a prior rename may have baked in, while
+              // preserving legitimately clean single-property titles.
+              const isBotRenamedTitle =
+                /^\s*\[Microsoft\.[^\]]+\]:\s+[\w.,\s-]+\s+propert(?:y|ies)\s+missing\s*$/i.test(title || '');
               const propertyNames = extractAllMissingProperties(
                 stripTemplate(title || ''),
                 stripTemplate(body || ''),
@@ -648,8 +692,7 @@ jobs:
               // (`[<Microsoft.X/y>]: <props> propert(y|ies) missing`) — otherwise
               // the auto-generated title feeds back into the classifier and
               // spuriously labels type-issue reports as missing-property.
-              const isBotRenamedTitle =
-                /^\s*\[Microsoft\.[^\]]+\]:\s+[\w.,\s-]+\s+propert(?:y|ies)\s+missing\s*$/i.test(title || '');
+              // (isBotRenamedTitle computed above, before extraction.)
               const hasExplicitMissingProp =
                 tmplIssueType === 'missing-property' ||
                 errPat.properties.length > 0 ||
