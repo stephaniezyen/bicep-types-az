@@ -1007,7 +1007,14 @@ jobs:
             // we mine genuine user wording for property names instead of the
             // bot's own prior output. The earliest `renamed` event's `from`
             // value is the title as first opened.
-            const originalTitle = await getOriginalTitle(num, issue.title || '');
+            // Only pay for the timeline lookup when the current title is one
+            // WE prefixed (`[Microsoft.X/y]: ...`). For a raw reporter title
+            // there's nothing to "recover" — the current title IS the original
+            // — so we skip the extra paginated API call on those triggers.
+            const titleLooksBotPrefixed = /^\s*\[Microsoft\.[^\]]+\]:/.test(issue.title || '');
+            const originalTitle = titleLooksBotPrefixed
+              ? await getOriginalTitle(num, issue.title || '')
+              : (issue.title || '');
             const cls = classify(text, {
               title: issue.title || '',
               body: issue.body || '',
@@ -1179,9 +1186,24 @@ jobs:
               cls.types.length > 0 &&
               cls.propertyName;
             if (shouldCheckDupes) {
-              const allOpen = await github.paginate(github.rest.issues.listForRepo, {
-                owner, repo, state: 'open', per_page: 100,
-              });
+              // Cost optimization: only scan issues already labeled in the
+              // SAME category bucket(s) rather than every open issue. These
+              // labels are applied by this same bot, so triaged issues in the
+              // category are reliably tagged — this shrinks the scan (and the
+              // per-issue re-classify) from "all open issues" down to just the
+              // relevant few. The API's `labels` filter is AND-combined, so we
+              // page each applicable bucket separately and merge by number.
+              const dupeBuckets = [];
+              if (cls.hasMissingPropertyLanguage) dupeBuckets.push('missing property');
+              if (cls.hasTypeIssueLanguage) dupeBuckets.push('type issue');
+              const openByNumber = new Map();
+              for (const lbl of dupeBuckets) {
+                const page = await github.paginate(github.rest.issues.listForRepo, {
+                  owner, repo, state: 'open', labels: lbl, per_page: 100,
+                });
+                for (const it of page) openByNumber.set(it.number, it);
+              }
+              const allOpen = [...openByNumber.values()];
               for (const other of allOpen) {
                 if (other.number === num) continue;
                 if (other.pull_request) continue;
