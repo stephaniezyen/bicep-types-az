@@ -164,6 +164,13 @@ jobs:
               // property path produces (real dotted paths are camelCase, e.g.
               // "properties.frontendIPConfigurations").
               if (/^[a-z]{1,6}\.[A-Z]/.test(name)) return false;
+              // Reject GUID / hash / correlation-id fragments (e.g.
+              // "c376fff78aa", "ba1e9f8c1e", "abff-08a26baeb411",
+              // "e1e6d94240a50608b998437f32"). These leak in from resource
+              // names, storage keys, and correlation IDs in user repros and
+              // are never property names. A property name is never a run of
+              // 8+ hex digits (optionally hyphen-separated like a GUID).
+              if (/^[0-9a-fA-F]{8,}$/.test(name.replace(/-/g, ''))) return false;
               return true;
             }
             function isLikelyIdentifier(name) {
