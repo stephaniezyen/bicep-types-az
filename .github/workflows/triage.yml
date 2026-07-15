@@ -888,6 +888,64 @@ jobs:
               return new RegExp(`(?<![A-Za-z0-9_])${esc}(?![A-Za-z0-9_])`, 'i').test(pageText);
             }
 
+            // Scope a types.md down to a SINGLE resource type's schema so a
+            // property check can't match a property that belongs to a
+            // different resource sharing the same namespace file (a storage
+            // types.md, for example, defines ~17 resources + ~100 shared
+            // object types). We split the doc into `## `-delimited sections,
+            // then walk `[Type](#anchor)` references starting from the target
+            // `## Resource <type>@<version>` heading, transitively pulling in
+            // only the object-type definitions that resource actually uses.
+            // Returns '' when the resource heading can't be found (caller
+            // falls back to the whole document).
+            function scopeToResourceType(pageText, type, version) {
+              if (!pageText || !type) return '';
+              const lines = pageText.split(/\r?\n/);
+              // GitHub-style heading -> anchor slug (with duplicate suffixing).
+              const slugCounts = new Map();
+              const slugify = (h) => {
+                const s = h.toLowerCase().replace(/[^a-z0-9 -]/g, '').trim().replace(/\s+/g, '-');
+                const n = slugCounts.get(s) || 0;
+                slugCounts.set(s, n + 1);
+                return n === 0 ? s : `${s}-${n}`;
+              };
+              const sections = [];
+              let cur = null;
+              for (const ln of lines) {
+                const h = /^##\s+(.*\S)\s*$/.exec(ln);
+                if (h) {
+                  cur = { heading: h[1], anchor: slugify(h[1]), body: [] };
+                  sections.push(cur);
+                } else if (cur) {
+                  cur.body.push(ln);
+                }
+              }
+              const byAnchor = new Map();
+              for (const s of sections) byAnchor.set(s.anchor, s);
+              const want = `resource ${type}@${version}`.toLowerCase();
+              const start = sections.find(s => s.heading.toLowerCase() === want)
+                || sections.find(s => s.heading.toLowerCase().startsWith(`resource ${type.toLowerCase()}@`));
+              if (!start) return '';
+              const refRe = /\]\(#([a-z0-9-]+)\)/g;
+              const visited = new Set();
+              const queue = [start];
+              const out = [];
+              while (queue.length) {
+                const sec = queue.shift();
+                if (!sec || visited.has(sec.anchor)) continue;
+                visited.add(sec.anchor);
+                const text = sec.heading + '\n' + sec.body.join('\n');
+                out.push(text);
+                let m;
+                refRe.lastIndex = 0;
+                while ((m = refRe.exec(text)) !== null) {
+                  const target = byAnchor.get(m[1]);
+                  if (target && !visited.has(target.anchor)) queue.push(target);
+                }
+              }
+              return out.join('\n');
+            }
+
             function hashColor(s) {
               let h = 5381;
               for (let i = 0; i < s.length; i++) h = ((h << 5) + h + s.charCodeAt(i)) & 0xffffff;
@@ -1056,7 +1114,14 @@ jobs:
               const docs = await fetchDocsText(t, cls.apiVersion);
               core.info(`Types fetch for ${t} (requested=${cls.apiVersion || 'n/a'}): status=${docs.status} resolved=${docs.version || 'n/a'} matched=${docs.versionMatched} length=${docs.text ? docs.text.length : 0}`);
               if (docs.text) {
-                const results = cls.propertyNames.map(n => ({ name: n, found: pageHasWord(docs.text, n) }));
+                // Restrict the property search to ONLY this resource type's
+                // schema (its section + the object types it references) so a
+                // property defined on a different resource in the same
+                // namespace file can't yield a false "property found". Falls
+                // back to the whole document if the resource heading isn't
+                // located (shouldn't happen — fetchDocsText matched it).
+                const scoped = scopeToResourceType(docs.text, t, docs.version) || docs.text;
+                const results = cls.propertyNames.map(n => ({ name: n, found: pageHasWord(scoped, n) }));
                 const allFound = results.every(r => r.found);
                 propertyVerification = {
                   found: allFound,
