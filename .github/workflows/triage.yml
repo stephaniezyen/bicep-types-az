@@ -282,26 +282,6 @@ jobs:
               return candidates;
             }
 
-            // Returns either a single property name (string) or null.
-            // Layered: stripped title → body without code → body with code.
-            // The first layer that produces *any* candidate wins.
-            function extractMissingPropertyLayered(title, body, types) {
-              const exclude = buildExclusions(types);
-              const layers = [
-                stripTitlePrefix(title),
-                stripCode(body || ''),
-                body || '',
-              ];
-              for (const layer of layers) {
-                if (!layer) continue;
-                const cands = extractPropertyCandidates(layer, exclude);
-                if (cands.length > 0) return cands[0].name;
-              }
-              // Fallback: "<identifier> is not allowed/recognized/supported/permitted"
-              // catches phrasings without an explicit "property" word.
-              return extractInvertedFallback((title || '') + '\n' + (body || ''), exclude);
-            }
-
             // Catches phrasings like:
             //   "networkAcls is not allowed"
             //   "publicNetworkAccess is not recognized"
@@ -466,12 +446,6 @@ jobs:
                 if (fb) out.push(fb);
               }
               return out;
-            }
-
-            // Legacy single-text variant used in dedup loops (no title/body split).
-            function extractMissingProperty(text) {
-              const cands = extractPropertyCandidates(text, new Set());
-              return cands.length > 0 ? cands[0].name : null;
             }
 
             // Strip fenced/inline code blocks so extraction doesn't pull identifiers
@@ -999,10 +973,6 @@ jobs:
               'microsoft.resources/deploymentscripts',
               'microsoft.resources/deploymentstacks',
             ]);
-            const WRAPPER_RPS = new Set([
-              // Wrappers as bare RPs only deprioritized if they appear ONLY because of
-              // wrapper types — handled below by filtering deployments-typed mentions.
-            ]);
             function nonWrapperTypes(types) {
               return types.filter(t => !WRAPPER_TYPES.has(t.toLowerCase()));
             }
@@ -1171,12 +1141,6 @@ jobs:
               }
               duplicateMatches.sort((a, b) => new Date(a.createdAt) - new Date(b.createdAt));
             }
-
-            // If we have type-issue or missing-property language but no extractable property
-            // name, we can't dedupe — ask the reporter to specify which property.
-            const needsPropertyClarification =
-              !cls.propertyName &&
-              (cls.hasTypeIssueLanguage || cls.hasMissingPropertyLanguage);
 
             if (duplicateMatches.length > 0) {
               labelsToApply.add('possible-duplicate');
