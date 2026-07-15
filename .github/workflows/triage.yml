@@ -122,7 +122,7 @@ jobs:
               // Literal values and common placeholder identifiers that are never
               // property names.
               'true','false','null','undefined','foo','bar','baz','qux','todo','xxx','yyy','zzz',
-              'azure','microsoft','i','it','we','you','they','please','still','need','want',
+              'azure','microsoft','i','it','we','you','they','please','need','want',
               // Common tag/prefix words found in issue titles like "Test:", "Bug:", "Feature:".
               'test','tests','testing','bug','bugs','feature','fix','wip','draft','rfc','question','help',
               'bicep','arm','json','yaml','terraform','template','templates','repro','example','examples',
@@ -132,14 +132,14 @@ jobs:
               // Common English words that show up as sentence-starters or noise in
               // issue prose but are not property names.
               'error','errors','based','however','additionally','note','notes','there','here',
-              'example','examples','deployment','deployments','deploy','deployed','deploying',
-              'trying','tried','using','used','set','setting','sets','using',
+              'deployment','deployments','deploy','deployed','deploying',
+              'trying','tried','using','used','set','setting','sets',
               'above','below','following','followed','after','before','during','while',
               'reference','references','referenced','object','objects',
               // Product/technology names that commonly appear as prose references.
               'redis','graph','cosmos','sql','kusto','synapse','fabric','purview',
               // API/protocol acronyms that show up in prose ("REST API", "SDK", etc.)
-              'rest','api','apis','sdk','http','https','url','uri','arm','json','yaml',
+              'rest','apis','sdk','http','https','url','uri',
               // Partial-word fragments that show up when regex splits on punctuation
               // (e.g. "ApiCenter services" → "ApiCe").
               'apice','microsof','azur',
