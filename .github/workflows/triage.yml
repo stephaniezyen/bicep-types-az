@@ -1295,6 +1295,10 @@ jobs:
             // we can correct earlier noisy renames even after the docs check
             // reclassifies the issue as `property found`.
             const titleIsBotOwned = /^\s*\[Microsoft\.[^\]]+\]:\s+.+\s+propert(?:y|ies)\s+missing\s*$/i.test(issue.title || '');
+            // Any `[Microsoft.X/y]: <description>` title — the shape we always
+            // want to own and normalize, even if a reporter (not the bot) wrote
+            // the freeform description after the resource-type prefix.
+            const titleIsResourcePrefixed = /^\s*\[Microsoft\.[^\]]+\]:\s+\S/i.test(issue.title || '');
             if (cls.propertyNames.length > 0 && cls.types.length > 0 &&
                 (cls.hasMissingPropertyLanguage || titleIsBotOwned) &&
                 !(propertyVerification && propertyVerification.found && !titleIsBotOwned)) {
@@ -1307,14 +1311,18 @@ jobs:
                 });
                 core.info(`Renamed issue to: ${normalizedTitle}`);
               }
-            } else if (titleIsBotOwned && cls.propertyNames.length === 0 && cls.types.length > 0) {
-              // The current title is one WE generated ("<props> properties
-              // missing"), but re-mining the reporter's ORIGINAL wording no
-              // longer yields any property name. That means the previous list
-              // was garbage — repro parameter/function names, resource-name
-              // words, or noise baked in by an earlier bot-title feedback loop.
-              // Strip the stale property list rather than leave wrong names in
-              // the title. Fall back to a neutral, category-appropriate title.
+            } else if ((titleIsBotOwned || titleIsResourcePrefixed) &&
+                       (cls.hasMissingPropertyLanguage || cls.hasTypeUnavailableLanguage) &&
+                       cls.propertyNames.length === 0 && cls.types.length > 0) {
+              // The title is either one WE generated ("<props> properties
+              // missing") or a freeform `[Microsoft.X/y]: <description>` a
+              // reporter wrote — and re-mining the body yields no property
+              // name. Either the previous list was garbage (repro parameter/
+              // function names, resource-name words, noise baked in by an
+              // earlier bot-title feedback loop) or the reporter never named a
+              // specific property. Always normalize these to a neutral,
+              // category-appropriate title rather than leaving a wrong or
+              // freeform description in place.
               const generic = (cls.hasTypeUnavailableLanguage && !cls.hasMissingPropertyLanguage)
                 ? `[${cls.types[0]}]: Type is unavailable`
                 : `[${cls.types[0]}]: Missing property`;
