@@ -1337,7 +1337,7 @@ jobs:
                 core.info(`Reset stale bot title to neutral: ${generic}`);
               }
             } else if (titleIsPlaceholder &&
-                       (cls.hasMissingPropertyLanguage || cls.hasTypeUnavailableLanguage) &&
+                       (cls.hasMissingPropertyLanguage || cls.hasTypeUnavailableLanguage || cls.hasTypeIssueLanguage) &&
                        cls.types.length > 0) {
               // The reporter never edited the issue-template default, so the
               // title is still the literal `[<resource_type>]: <description>`
@@ -1345,17 +1345,22 @@ jobs:
               // title mined from the BODY — including the `property found`
               // contradiction case (property named + verified present), where
               // neither branch above fires and the placeholder would otherwise
-              // survive.
+              // survive. Requires a parseable Microsoft.X/y type; placeholders
+              // whose body gives no resolvable resource type are left untouched.
               const verifiedFound = propertyVerification && propertyVerification.found;
+              const isMissingCat = cls.hasMissingPropertyLanguage || cls.hasTypeUnavailableLanguage;
               let target;
-              if (cls.propertyNames.length > 0 && !verifiedFound) {
+              if (isMissingCat && cls.propertyNames.length > 0 && !verifiedFound) {
                 const props = cls.propertyNames.slice(0, 3).join(', ');
                 const wordForm = cls.propertyNames.length > 1 ? 'properties' : 'property';
                 target = `[${cls.types[0]}]: ${props} ${wordForm} missing`;
-              } else {
+              } else if (isMissingCat) {
                 target = (cls.hasTypeUnavailableLanguage && !cls.hasMissingPropertyLanguage)
                   ? `[${cls.types[0]}]: Type is unavailable`
                   : `[${cls.types[0]}]: Missing property`;
+              } else {
+                // Type-issue-only placeholder (inaccurate property type/desc).
+                target = `[${cls.types[0]}]: Type issue`;
               }
               if (issue.title !== target) {
                 await github.rest.issues.update({
