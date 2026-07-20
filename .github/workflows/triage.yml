@@ -1299,6 +1299,10 @@ jobs:
             // want to own and normalize, even if a reporter (not the bot) wrote
             // the freeform description after the resource-type prefix.
             const titleIsResourcePrefixed = /^\s*\[Microsoft\.[^\]]+\]:\s+\S/i.test(issue.title || '');
+            // The unedited issue-template default title, left verbatim by a
+            // reporter who never filled it in: `[<resource_type>]: <description>`
+            // (tolerant of angle brackets, spacing, and _/space in the token).
+            const titleIsPlaceholder = /^\s*\[\s*<?\s*resource[_\s]?type\s*>?\s*\]\s*:\s*<?\s*description\s*>?\s*$/i.test(issue.title || '');
             if (cls.propertyNames.length > 0 && cls.types.length > 0 &&
                 (cls.hasMissingPropertyLanguage || titleIsBotOwned) &&
                 !(propertyVerification && propertyVerification.found && !titleIsBotOwned)) {
@@ -1331,6 +1335,33 @@ jobs:
                   owner, repo, issue_number: num, title: generic,
                 });
                 core.info(`Reset stale bot title to neutral: ${generic}`);
+              }
+            } else if (titleIsPlaceholder &&
+                       (cls.hasMissingPropertyLanguage || cls.hasTypeUnavailableLanguage) &&
+                       cls.types.length > 0) {
+              // The reporter never edited the issue-template default, so the
+              // title is still the literal `[<resource_type>]: <description>`
+              // placeholder. Always replace it with a real, category-appropriate
+              // title mined from the BODY — including the `property found`
+              // contradiction case (property named + verified present), where
+              // neither branch above fires and the placeholder would otherwise
+              // survive.
+              const verifiedFound = propertyVerification && propertyVerification.found;
+              let target;
+              if (cls.propertyNames.length > 0 && !verifiedFound) {
+                const props = cls.propertyNames.slice(0, 3).join(', ');
+                const wordForm = cls.propertyNames.length > 1 ? 'properties' : 'property';
+                target = `[${cls.types[0]}]: ${props} ${wordForm} missing`;
+              } else {
+                target = (cls.hasTypeUnavailableLanguage && !cls.hasMissingPropertyLanguage)
+                  ? `[${cls.types[0]}]: Type is unavailable`
+                  : `[${cls.types[0]}]: Missing property`;
+              }
+              if (issue.title !== target) {
+                await github.rest.issues.update({
+                  owner, repo, issue_number: num, title: target,
+                });
+                core.info(`Normalized placeholder title to: ${target}`);
               }
             }
 
