@@ -1,0 +1,11 @@
+{
+  "name": "bicep-types-az-triage",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Heuristic issue-triage engine for stephaniezyen/bicep-types-az (loaded by .github/workflows/triage.yml).",
+  "scripts": {
+    "check": "node --check triage.mjs",
+    "test": "node --test"
+  }
+}
