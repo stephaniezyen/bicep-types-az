@@ -3,6 +3,7 @@ name: Triage engine CI
 # Syntax-checks and smoke-tests the triage engine whenever it changes, so a
 # broken export or top-level error can't reach the live Auto-triage workflow.
 on:
+  workflow_dispatch:
   pull_request:
     paths:
       - ".github/scripts/**"
