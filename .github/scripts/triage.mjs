@@ -16,9 +16,15 @@
 // Uses the global fetch (Node 20+) to pull generated types.md from
 // Azure/bicep-types-az. No LLM, no external dependencies.
 
-export async function run({ github, context, core }) {
+// ============================================================================
+// Pure heuristics — hoisted to module scope so CI (triage.test.mjs) can
+// unit-test them directly. None of these touch github/context/core; run()
+// below wires them to the live GitHub API.
+// ============================================================================
+
 const MARKER = '<!-- auto-triage-bot:v3 -->';
 const TYPES_REPO = 'Azure/bicep-types-az';
+const [TYPES_OWNER, TYPES_NAME] = TYPES_REPO.split('/');
 const TYPES_BRANCH = 'main';
 const RAW_BASE = `https://raw.githubusercontent.com/${TYPES_REPO}/${TYPES_BRANCH}/generated`;
 const UA = 'bicep-types-az-triage-bot/3.0';
@@ -774,116 +780,6 @@ function classify(text, opts) {
   };
 }
 
-// --- Property verification via Azure/bicep-types-az generated types.md ---
-// Cache directory listings so we don't refetch across property lookups.
-const generatedListCache = { promise: null };
-const dirCache = new Map();
-async function listGenerated() {
-  if (!generatedListCache.promise) {
-    generatedListCache.promise = (async () => {
-      try {
-        const res = await github.request(
-          `GET /repos/${TYPES_REPO}/contents/generated?ref=${TYPES_BRANCH}`,
-          { headers: { 'user-agent': UA } }
-        );
-        return res.data.map(e => e.name);
-      } catch (e) {
-        core.warning(`listGenerated failed: ${e.message}`);
-        return [];
-      }
-    })();
-  }
-  return generatedListCache.promise;
-}
-async function listContents(path) {
-  if (dirCache.has(path)) return dirCache.get(path);
-  const p = (async () => {
-    try {
-      const res = await github.request(
-        `GET /repos/${TYPES_REPO}/contents/${path}?ref=${TYPES_BRANCH}`,
-        { headers: { 'user-agent': UA } }
-      );
-      return res.data.map(e => ({ name: e.name, type: e.type }));
-    } catch (e) {
-      return [];
-    }
-  })();
-  dirCache.set(path, p);
-  return p;
-}
-async function fetchTypesMd(folder, ns, version) {
-  const url = `${RAW_BASE}/${folder}/${ns}/${version}/types.md`;
-  try {
-    const res = await fetch(url, { headers: { 'User-Agent': UA } });
-    if (!res.ok) return { url, status: res.status, text: null };
-    return { url, status: res.status, text: await res.text() };
-  } catch (e) {
-    return { url, status: null, text: null, error: e.message };
-  }
-}
-
-// Resolve a Microsoft.X/y resource type to the types.md that
-// declares it. If preferVersion is provided, try that exact
-// API version first (so we verify against the version the user
-// is actually using). Fall back to the latest available.
-// Returns { url, status, text, version } — or null text when no
-// matching definition exists.
-async function fetchDocsText(type, preferVersion) {
-  const parts = type.split('/');
-  if (parts.length < 2 || !/^Microsoft\./i.test(parts[0])) {
-    return { url: null, status: null, text: null };
-  }
-  const namespace = parts[0].toLowerCase(); // microsoft.containerregistry
-  const slug = namespace.replace(/^microsoft\./, ''); // containerregistry
-  const generated = await listGenerated();
-  const slugRe = new RegExp(`^${slug.replace(/[.*+?^${}()|[\\]\\\\]/g, '\\$&')}(_\\d+)?$`);
-  const candidates = generated.filter(n => slugRe.test(n));
-  if (!candidates.length) {
-    return { url: null, status: 404, text: null };
-  }
-  // Collect every (folder, nsDir, version) triple across candidate folders.
-  const all = [];
-  for (const folder of candidates) {
-    const entries = await listContents(`generated/${folder}`);
-    const nsDir = entries.find(e => e.type === 'dir' && e.name.toLowerCase() === namespace);
-    if (!nsDir) continue;
-    const versions = await listContents(`generated/${folder}/${nsDir.name}`);
-    for (const v of versions) {
-      if (v.type === 'dir') all.push({ folder, nsDir: nsDir.name, v: v.name });
-    }
-  }
-  if (!all.length) return { url: null, status: 404, text: null };
-  // Sort by version descending (ISO date strings sort correctly);
-  // '-preview' suffix sorts AFTER the bare date, so preview wins ties.
-  all.sort((a, b) => b.v.localeCompare(a.v));
-  // If the user pinned an API version, try exact match first so we
-  // verify against what they're actually deploying.
-  if (preferVersion) {
-    const pv = preferVersion.toLowerCase();
-    const idx = all.findIndex(c => c.v.toLowerCase() === pv);
-    if (idx > 0) {
-      const [pinned] = all.splice(idx, 1);
-      all.unshift(pinned);
-    }
-  }
-  const escType = type.replace(/[.*+?^${}()|[\]\\/]/g, '\\$&');
-  const markerRe = new RegExp(`^## Resource ${escType}@`, 'im');
-  for (const cand of all) {
-    const res = await fetchTypesMd(cand.folder, cand.nsDir, cand.v);
-    if (!res.text) continue;
-    if (!markerRe.test(res.text)) continue;
-    return {
-      url: `https://github.com/${TYPES_REPO}/blob/${TYPES_BRANCH}/generated/${cand.folder}/${cand.nsDir}/${cand.v}/types.md`,
-      status: 200,
-      text: res.text,
-      version: cand.v,
-      requestedVersion: preferVersion || null,
-      versionMatched: preferVersion ? cand.v.toLowerCase() === preferVersion.toLowerCase() : null,
-    };
-  }
-  return { url: null, status: 404, text: null };
-}
-
 // Case-insensitive whole-word search.
 function pageHasWord(pageText, word) {
   if (!pageText || !word) return false;
@@ -954,6 +850,177 @@ function hashColor(s) {
   for (let i = 0; i < s.length; i++) h = ((h << 5) + h + s.charCodeAt(i)) & 0xffffff;
   return h.toString(16).padStart(6, '0');
 }
+
+// Compare two ARM API-version strings for a DESCENDING sort (newest first).
+// For the SAME date, a stable GA version outranks a -preview/-beta/-alpha of
+// that date, so "latest" never resolves to a preview when a GA exists.
+function compareTypeVersions(a, b) {
+  const parse = (v) => {
+    const m = /^(\d{4}-\d{2}-\d{2})(?:-(preview|beta|alpha|privatepreview)(?:-(\d+))?)?$/i.exec(v || '');
+    if (!m) return { date: (v || '').toLowerCase(), stage: 0, rev: 0, raw: (v || '').toLowerCase() };
+    return { date: m[1], stage: m[2] ? 1 : 0, rev: m[3] ? parseInt(m[3], 10) : 0, raw: (v || '').toLowerCase() };
+  };
+  const pa = parse(a), pb = parse(b);
+  if (pa.date !== pb.date) return pa.date < pb.date ? 1 : -1; // newer date first
+  if (pa.stage !== pb.stage) return pa.stage - pb.stage;      // GA(0) before preview(1)
+  if (pa.rev !== pb.rev) return pb.rev - pa.rev;              // higher revision first
+  return pb.raw.localeCompare(pa.raw);
+}
+
+export {
+  classify,
+  extractAllMissingProperties,
+  extractErrorPatterns,
+  extractApiVersion,
+  normalizeNs,
+  isPlausiblePropertyName,
+  isLikelyIdentifier,
+  pageHasWord,
+  scopeToResourceType,
+  hashColor,
+  compareTypeVersions,
+};
+
+export async function run({ github, context, core }) {
+
+// --- Property verification via Azure/bicep-types-az generated types.md ---
+// Cache directory listings so we don't refetch across property lookups.
+const generatedListCache = { promise: null };
+const dirCache = new Map();
+async function listGenerated() {
+  if (!generatedListCache.promise) {
+    generatedListCache.promise = (async () => {
+      try {
+        // Paginated so a `generated/` tree that grows past the contents
+        // API's single-page cap (~1000 entries) still lists in full.
+        const data = await github.paginate(github.rest.repos.getContent, {
+          owner: TYPES_OWNER, repo: TYPES_NAME, path: 'generated',
+          ref: TYPES_BRANCH, per_page: 100,
+          headers: { 'user-agent': UA },
+        });
+        return (Array.isArray(data) ? data : []).map(e => e.name);
+      } catch (e) {
+        core.warning(`listGenerated failed: ${e.message}`);
+        return [];
+      }
+    })();
+  }
+  return generatedListCache.promise;
+}
+async function listContents(path) {
+  if (dirCache.has(path)) return dirCache.get(path);
+  const p = (async () => {
+    try {
+      const data = await github.paginate(github.rest.repos.getContent, {
+        owner: TYPES_OWNER, repo: TYPES_NAME, path,
+        ref: TYPES_BRANCH, per_page: 100,
+        headers: { 'user-agent': UA },
+      });
+      return (Array.isArray(data) ? data : []).map(e => ({ name: e.name, type: e.type }));
+    } catch (e) {
+      return [];
+    }
+  })();
+  dirCache.set(path, p);
+  return p;
+}
+// fetch() with an abort-based timeout so a hung raw.githubusercontent.com
+// request can't stall the whole triage job (the workflow also caps the job
+// via timeout-minutes as a backstop).
+async function fetchWithTimeout(url, opts = {}, ms = 10000) {
+  const ac = new AbortController();
+  const timer = setTimeout(() => ac.abort(), ms);
+  try {
+    return await fetch(url, { ...opts, signal: ac.signal });
+  } finally {
+    clearTimeout(timer);
+  }
+}
+async function fetchTypesMd(folder, ns, version) {
+  const url = `${RAW_BASE}/${folder}/${ns}/${version}/types.md`;
+  try {
+    const res = await fetchWithTimeout(url, { headers: { 'User-Agent': UA } }, 10000);
+    if (!res.ok) return { url, status: res.status, text: null };
+    return { url, status: res.status, text: await res.text() };
+  } catch (e) {
+    return { url, status: null, text: null, error: e.message };
+  }
+}
+
+// Resolve a Microsoft.X/y resource type to the types.md that
+// declares it. If preferVersion is provided, try that exact
+// API version first (so we verify against the version the user
+// is actually using). Fall back to the latest available.
+// Returns { url, status, text, version } — or null text when no
+// matching definition exists.
+async function fetchDocsText(type, preferVersion) {
+  const parts = type.split('/');
+  if (parts.length < 2 || !/^Microsoft\./i.test(parts[0])) {
+    return { url: null, status: null, text: null };
+  }
+  const namespace = parts[0].toLowerCase(); // microsoft.containerregistry
+  const slug = namespace.replace(/^microsoft\./, ''); // containerregistry
+  const generated = await listGenerated();
+  const slugRe = new RegExp(`^${slug.replace(/[.*+?^${}()|[\\]\\\\]/g, '\\$&')}(_\\d+)?$`);
+  const candidates = generated.filter(n => slugRe.test(n));
+  if (!candidates.length) {
+    return { url: null, status: 404, text: null };
+  }
+  // Collect every (folder, nsDir, version) triple across candidate folders.
+  const all = [];
+  for (const folder of candidates) {
+    const entries = await listContents(`generated/${folder}`);
+    const nsDir = entries.find(e => e.type === 'dir' && e.name.toLowerCase() === namespace);
+    if (!nsDir) continue;
+    const versions = await listContents(`generated/${folder}/${nsDir.name}`);
+    for (const v of versions) {
+      if (v.type === 'dir') all.push({ folder, nsDir: nsDir.name, v: v.name });
+    }
+  }
+  if (!all.length) return { url: null, status: 404, text: null };
+  // Sort newest-first. compareTypeVersions ranks a stable GA above a
+  // -preview of the same date, so "latest" never resolves to a preview
+  // when a GA exists.
+  all.sort((a, b) => compareTypeVersions(a.v, b.v));
+  // If the user pinned an API version, try exact match first so we
+  // verify against what they're actually deploying.
+  if (preferVersion) {
+    const pv = preferVersion.toLowerCase();
+    const idx = all.findIndex(c => c.v.toLowerCase() === pv);
+    if (idx > 0) {
+      const [pinned] = all.splice(idx, 1);
+      all.unshift(pinned);
+    }
+  }
+  const escType = type.replace(/[.*+?^${}()|[\]\\/]/g, '\\$&');
+  const markerRe = new RegExp(`^## Resource ${escType}@`, 'im');
+  // Walk candidates newest-first, but fetch in small parallel batches so a
+  // type that doesn't exist (or only exists in an old version) costs
+  // ceil(N/BATCH) round trips instead of N sequential ones. Within a batch
+  // we still honor sort order, returning the highest-ranked match.
+  const BATCH = 6;
+  for (let i = 0; i < all.length; i += BATCH) {
+    const batch = all.slice(i, i + BATCH);
+    const fetched = await Promise.all(
+      batch.map(cand => fetchTypesMd(cand.folder, cand.nsDir, cand.v))
+    );
+    for (let j = 0; j < batch.length; j++) {
+      const res = fetched[j];
+      if (!res.text || !markerRe.test(res.text)) continue;
+      const cand = batch[j];
+      return {
+        url: `https://github.com/${TYPES_REPO}/blob/${TYPES_BRANCH}/generated/${cand.folder}/${cand.nsDir}/${cand.v}/types.md`,
+        status: 200,
+        text: res.text,
+        version: cand.v,
+        requestedVersion: preferVersion || null,
+        versionMatched: preferVersion ? cand.v.toLowerCase() === preferVersion.toLowerCase() : null,
+      };
+    }
+  }
+  return { url: null, status: 404, text: null };
+}
+
 
 async function ensureLabel(label, description) {
   try {
