@@ -1,0 +1,34 @@
+name: Triage engine CI
+
+# Syntax-checks and smoke-tests the triage engine whenever it changes, so a
+# broken export or top-level error can't reach the live Auto-triage workflow.
+on:
+  pull_request:
+    paths:
+      - ".github/scripts/**"
+      - ".github/workflows/triage.yml"
+      - ".github/workflows/triage-ci.yml"
+  push:
+    branches: [main]
+    paths:
+      - ".github/scripts/**"
+      - ".github/workflows/triage.yml"
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: .github/scripts
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+      - name: Syntax check
+        run: node --check triage.mjs
+      - name: Smoke tests
+        run: node --test
