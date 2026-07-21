@@ -145,6 +145,15 @@ const PROPERTY_NAME_STOPWORDS = new Set([
   // Partial-word fragments that show up when regex splits on punctuation
   // (e.g. "ApiCenter services" → "ApiCe").
   'apice','microsof','azur',
+  // ARM/JSON error-envelope keys. Deployment/preflight errors are pasted
+  // as JSON whose keys (`"message"`, `"code"`, `"target"`, ...) sit right
+  // next to the word "property" (e.g. `"message": "Account property
+  // accessTier is required"`), so the prose miner would otherwise extract
+  // them as property names. These are never Bicep resource properties in
+  // that context.
+  'message','messages','code','codes','target','targets','details','detail',
+  'innererror','correlationid','statuscode','requestid','activityid','timestamp',
+  'additionalinfo','tracking','trackingid',
 ]);
 
 function isPlausiblePropertyName(name) {
@@ -353,6 +362,21 @@ function extractErrorPatterns(text) {
       if (m[2]) containerTypes.push(m[2]);
     }
   }
+  // Reversed-order patterns where the CONTAINER type is named BEFORE
+  // the property — e.g. Bicep's `The type "ApiConnectionDefinition
+  // Properties" does not contain property "connectionRuntimeUrl".`
+  // Here capture group 1 is the container and group 2 is the property
+  // (the opposite of the patterns above), so map them accordingly.
+  const reversedPatterns = [
+    /\btype\s+["'`]\**([A-Za-z_][\w.-]*)\**["'`]\s+does(?:\s+not|n['’]?t)\s+(?:contain|include|define|declare|have)\s+(?:the\s+|a\s+)?(?:property|member)\s+["'`]\**([A-Za-z_][\w.-]*)\**["'`]/gi,
+  ];
+  for (const re of reversedPatterns) {
+    let m;
+    while ((m = re.exec(text)) !== null) {
+      if (m[1]) containerTypes.push(m[1]);
+      if (isPlausiblePropertyName(m[2])) properties.push(m[2]);
+    }
+  }
   return { properties, containerTypes };
 }
 
@@ -400,29 +424,29 @@ function extractAllMissingProperties(title, body, types) {
   for (const ct of errPat.containerTypes) exclude.add(ct.toLowerCase());
   const out = [];
   const seen = new Set();
-  for (const p of errPat.properties) {
+  const pushName = (p) => {
+    if (!p) return;
     const k = p.toLowerCase();
     if (!seen.has(k)) { seen.add(k); out.push(p); }
-  }
-  // High-confidence signal: if the error-pattern extractor found
-  // named properties, trust ONLY those. Don't augment with prose-
-  // mined identifiers that tend to pull noise words ("However",
-  // "Code", "Error") out of surrounding sentences.
-  if (out.length > 0) return out;
-  // Definitively-missing linter/ARM phrases (e.g. `The property
-  // "identity" does not exist in the resource or type definition`)
-  // are equally trustworthy — return ONLY the captured names when
-  // present, skipping the noisier prose layers.
+  };
+  // High-confidence layer A: structured error-message patterns.
+  for (const p of errPat.properties) pushName(p);
+  // High-confidence layer B: definitively-missing linter/ARM phrases
+  // (e.g. `The property "identity" does not exist in the resource or
+  // type definition`). Both A and B are trustworthy structured Bicep/
+  // ARM diagnostics, so we MERGE them rather than letting whichever
+  // matches first win — an issue that quotes two DIFFERENT error
+  // shapes (e.g. `The property "kind" does not exist...` AND `The type
+  // "X" does not contain property "connectionRuntimeUrl"`) must
+  // surface BOTH property names, not just the first.
   for (const re of DEFINITIVELY_MISSING_REGEXES) {
     const rg = new RegExp(re.source, re.flags.includes('g') ? re.flags : re.flags + 'g');
     let m;
-    while ((m = rg.exec(fullText)) !== null) {
-      const p = m[1];
-      if (!p) continue;
-      const k = p.toLowerCase();
-      if (!seen.has(k)) { seen.add(k); out.push(p); }
-    }
+    while ((m = rg.exec(fullText)) !== null) pushName(m[1]);
   }
+  // If either high-confidence layer named properties, trust ONLY those.
+  // Don't augment with prose-mined identifiers that tend to pull noise
+  // words ("However", "Code", "Error") out of surrounding sentences.
   if (out.length > 0) return out;
   // Structured "properties:" list in prose (indented enumeration)
   // — e.g. `properties:` followed by indented `parameterValueType`
@@ -541,6 +565,20 @@ const TYPE_ISSUE_REGEXES = [
   /\binaccurate\s+propert(?:y|ies)?\s+type/i,
 ];
 
+// Language indicating "the type exists and its shape is fine, but a
+// property's DESCRIPTION / documentation is wrong, incomplete, or
+// confusing" — the Azure issue-template's "Inaccurate/confusing
+// description(s)" bucket. Kept separate from type-issue so these get
+// their own `inaccurate description` label instead of being mislabeled
+// or slipping through uncategorized.
+const DESCRIPTION_ISSUE_REGEXES = [
+  /\b(?:inaccurate|incomplete|incorrect|wrong|confusing|misleading|unclear|outdated)\s+description\b/i,
+  /\bdescription\s+(?:for|of)\b[^\n]{0,80}?\bis\s+(?:inaccurate|incomplete|incorrect|wrong|confusing|misleading|unclear|outdated|missing)\b/i,
+  /\bdescription\s+(?:is\s+)?(?:inaccurate|incomplete|incorrect|wrong|confusing|misleading|unclear|outdated)\b/i,
+  /\b(?:doc|docs|documentation)\s+(?:for|of|on)\b[^\n]{0,80}?\b(?:is\s+)?(?:inaccurate|incomplete|incorrect|wrong|confusing|misleading|unclear|outdated)\b/i,
+  /\bdocumentation\s+does(?:\s+not|n['']?t)\s+(?:mention|explain|describe|cover|say)\b/i,
+];
+
 // Language indicating a runtime/deployment bug (not a schema/type issue).
 const BUG_REGEXES = [
   /\b(?:deployment|deploy|provisioning)\s+(?:fail|fails|failed|failing)\b/i,
@@ -591,8 +629,15 @@ function normalizeNs(raw) {
 const VERSION_TOKEN = /\b(\d{4}-\d{2}-\d{2}(?:-(?:preview|beta|alpha|privatepreview)(?:-\d+)?)?)\b/g;
 function extractApiVersion(title, body) {
   const text = (title || '') + '\n' + (body || '');
-  // 1. Azure issue-template "### Api Version" block.
-  const tmpl = /###\s+Api\s+Version\s*[\r\n]+\s*([0-9][^\r\n]*)/i.exec(text);
+  // 1. Azure issue-template "### Api Version" block. Tolerate BOTH the
+  //    normal fenced form ("### Api Version\n\n2024-10-01") AND the
+  //    flattened form ("### Api Version  2024-10-01  ### Issue Type")
+  //    produced when a cross-posted body has its newlines collapsed to
+  //    spaces. Confine the search to THIS section (up to the next "###"
+  //    or end) so an unrelated date elsewhere in the body — e.g. the
+  //    "Originally opened ... on YYYY-MM-DD" cross-post line — can't be
+  //    mistaken for the API version.
+  const tmpl = /###\s+Api\s+Version\b[:\s]*([\s\S]*?)(?=\s*###|$)/i.exec(text);
   if (tmpl) {
     const tm = VERSION_TOKEN.exec(tmpl[1]);
     VERSION_TOKEN.lastIndex = 0;
@@ -669,6 +714,9 @@ function classify(text, opts) {
     if (/\btype\s+is\s+unavailable\b/.test(v) ||
         /\btype\s+(?:not|un)available\b/.test(v)) return 'type-unavailable';
     if (/\bmissing\s+propert/.test(v)) return 'missing-property';
+    // "Inaccurate/confusing description(s)" — check BEFORE type-issue so
+    // the shared word "inaccurate" doesn't misroute it to type-issue.
+    if (/description/.test(v)) return 'description-issue';
     if (/\btype\s+(?:is\s+)?(?:incorrect|wrong|inaccurate)\b/.test(v) ||
         /\binaccurate\s+propert(?:y|ies)?\s+type/.test(v)) return 'type-issue';
     if (/^bug\b/.test(v)) return 'bug';
@@ -743,8 +791,15 @@ function classify(text, opts) {
   if (hasDefinitivelyMissing) hasMP = true;
   let hasTypeIssue =
     !hasDefinitivelyMissing &&
+    tmplIssueType !== 'description-issue' &&
     (tmplIssueType === 'type-issue' ||
      TYPE_ISSUE_REGEXES.some(r => r.test(stripped)));
+  // Description/documentation issue (distinct from a wrong *type*).
+  // Template selection is authoritative; prose regexes catch it when
+  // the reporter didn't use the template.
+  let hasDescriptionIssue =
+    tmplIssueType === 'description-issue' ||
+    (tmplIssueType === null && DESCRIPTION_ISSUE_REGEXES.some(r => r.test(stripped)));
   let hasBug =
     tmplIssueType === 'bug' ||
     BUG_REGEXES.some(r => r.test(stripped));
@@ -763,6 +818,7 @@ function classify(text, opts) {
     hasMP = false;
     hasTypeIssue = false;
     hasTypeUnavail = false;
+    hasDescriptionIssue = false;
   }
 
   return {
@@ -771,6 +827,7 @@ function classify(text, opts) {
     hasMissingPropertyLanguage: hasMP,
     hasTypeIssueLanguage: hasTypeIssue,
     hasTypeUnavailableLanguage: hasTypeUnavail,
+    hasDescriptionIssueLanguage: hasDescriptionIssue,
     hasBugLanguage: hasBug,
     propertyName,
     propertyNames,
@@ -1221,6 +1278,10 @@ if (cls.hasTypeIssueLanguage) {
   labelsToApply.add('type issue');
 }
 
+if (cls.hasDescriptionIssueLanguage) {
+  labelsToApply.add('inaccurate description');
+}
+
 if (cls.hasTypeUnavailableLanguage) {
   // Treat "type unavailable" (whole resource type missing) as the
   // same taxonomy bucket as "missing property" — both are cases of
@@ -1233,7 +1294,19 @@ if (cls.hasBugLanguage) {
 }
 
 if (cls.hasMissingPropertyLanguage) {
-  if (propertyVerification && propertyVerification.found) {
+  // `property found` asserts the property exists AT THE USER'S API
+  // version. Only claim it when we actually verified against that
+  // version: either the user pinned no version (verify against latest,
+  // versionMatched === null) or the pinned version resolved exactly
+  // (versionMatched === true). If the user pinned a version we could
+  // NOT locate in the generated docs (versionMatched === false), we
+  // only checked a DIFFERENT version, so the property is not confirmed
+  // present for them — treat it as missing at their version.
+  const verifiedAtUserVersion =
+    propertyVerification &&
+    propertyVerification.found &&
+    propertyVerification.versionMatched !== false;
+  if (verifiedAtUserVersion) {
     labelsToApply.add('property found');
   } else {
     labelsToApply.add('missing property');
@@ -1342,6 +1415,7 @@ if (!labelsToApply.has('missing property') && !labelsToApply.has('property found
 // been folded into `missing property`.
 await removeLabelIf('types unavailable');
 if (!labelsToApply.has('type issue')) await removeLabelIf('type issue');
+if (!labelsToApply.has('inaccurate description')) await removeLabelIf('inaccurate description');
 if (!labelsToApply.has('bug')) await removeLabelIf('bug');
 // Strip stale `possible-duplicate` when this issue's category no
 // longer qualifies for dedupe (i.e. it's neither missing-property
@@ -1366,6 +1440,11 @@ const titleIsResourcePrefixed = /^\s*\[Microsoft\.[^\]]+\]:\s+\S/i.test(issue.ti
 // reporter who never filled it in: `[<resource_type>]: <description>`
 // (tolerant of angle brackets, spacing, and _/space in the token).
 const titleIsPlaceholder = /^\s*\[\s*<?\s*resource[_\s]?type\s*>?\s*\]\s*:\s*<?\s*description\s*>?\s*$/i.test(issue.title || '');
+// A title the bot itself generated as a neutral category placeholder
+// ("Missing property", "Type is unavailable", "Type issue",
+// "Inaccurate/confusing description"). We always own these and must
+// correct them when the category changes underneath us.
+const titleIsBotGeneric = /^\s*\[Microsoft\.[^\]]+\]:\s+(?:Missing property|Type is unavailable|Type issue|Inaccurate\/confusing description)\s*$/i.test(issue.title || '');
 if (cls.propertyNames.length > 0 && cls.types.length > 0 &&
     (cls.hasMissingPropertyLanguage || titleIsBotOwned) &&
     !(propertyVerification && propertyVerification.found && !titleIsBotOwned)) {
@@ -1398,6 +1477,35 @@ if (cls.propertyNames.length > 0 && cls.types.length > 0 &&
       owner, repo, issue_number: num, title: generic,
     });
     core.info(`Reset stale bot title to neutral: ${generic}`);
+  }
+} else if (cls.hasDescriptionIssueLanguage &&
+           (titleIsBotOwned || titleIsResourcePrefixed || titleIsPlaceholder || titleIsBotGeneric) &&
+           cls.types.length > 0) {
+  // Description/documentation issue: give it a neutral,
+  // category-appropriate title. This also corrects issues left with a
+  // stale bot-generated generic (e.g. an earlier run labeled it
+  // "Missing property") once the classification settles on
+  // description-issue.
+  const target = `[${cls.types[0]}]: Inaccurate/confusing description`;
+  if (issue.title !== target) {
+    await github.rest.issues.update({
+      owner, repo, issue_number: num, title: target,
+    });
+    core.info(`Normalized description-issue title to: ${target}`);
+  }
+} else if (titleIsBotGeneric && cls.types.length > 0 &&
+           !cls.hasMissingPropertyLanguage && !cls.hasTypeUnavailableLanguage &&
+           !cls.hasTypeIssueLanguage && !cls.hasDescriptionIssueLanguage) {
+  // The title is a stale bot-generated generic but the issue no
+  // longer classifies into any schema category (e.g. reclassified as
+  // an uncategorized/bug report). Reset it to a plain resource-typed
+  // title so a wrong category word ("Missing property") doesn't linger.
+  const target = `[${cls.types[0]}]: Needs triage`;
+  if (issue.title !== target) {
+    await github.rest.issues.update({
+      owner, repo, issue_number: num, title: target,
+    });
+    core.info(`Reset stale bot-generic title to: ${target}`);
   }
 } else if (titleIsPlaceholder &&
            (cls.hasMissingPropertyLanguage || cls.hasTypeUnavailableLanguage || cls.hasTypeIssueLanguage) &&
@@ -1443,7 +1551,12 @@ const priorBotComment = priorComments.find(c =>
 const commentBlocks = [];
 
 // "Property found in generated types" comment (contradiction).
-if (propertyVerification && propertyVerification.found) {
+// Same guard as the `property found` label: only claim we found it
+// when verification actually ran at the user's API version (or they
+// pinned none). If they pinned a version we couldn't locate, we only
+// checked a different version and must not assert the property exists.
+if (propertyVerification && propertyVerification.found &&
+    propertyVerification.versionMatched !== false) {
   const list = propertyVerification.results.map(r => `\`${r.name}\``).join(', ');
   const rv = propertyVerification.requestedVersion;
   const v = propertyVerification.version;
