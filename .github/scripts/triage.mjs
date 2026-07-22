@@ -168,6 +168,13 @@ function isPlausiblePropertyName(name) {
   // `_No response_`, or "_New-AzDeployment"). Real ARM/Bicep
   // property names never start or end with an underscore.
   if (/^_|_$/.test(name)) return false;
+  // Reject hyphenated tokens. Real ARM/Bicep property names are
+  // camelCase and never contain hyphens — a hyphenated token is
+  // almost always a CLI flag or query param that leaked in from a
+  // repro ("what-if", "api-version", "resource-group"), not a
+  // schema property. (Dotted paths like "properties.foo" are still
+  // allowed; only the hyphen is disqualifying.)
+  if (name.includes('-')) return false;
   // Reject truncated "Microsoft.X" namespace fragments that survive
   // in stale bot-renamed titles — e.g. "soft.Web", "oft.Web",
   // "t.App", "osoft.Network". These are a short all-lowercase run
@@ -189,6 +196,33 @@ function isLikelyIdentifier(name) {
   // Plain-English words of any length (e.g. "noticed", "missing") shouldn't qualify.
   if (/^Microsoft\./i.test(name)) return false;
   return /[A-Z]/.test(name) || /[_\d]/.test(name);
+}
+
+// Collapse redundant path forms of the same property to a single clean
+// entry. ARM properties are all nested under `properties`, so a leading
+// `properties.` prefix is pure noise; and when a reporter (or our own
+// extraction) surfaces both a bare leaf (`disablePasswordAuthentication`)
+// and one or more dotted ancestors of it
+// (`linuxConfiguration.disablePasswordAuthentication`,
+// `properties.osProfile.linuxConfiguration.disablePasswordAuthentication`),
+// they all refer to the same property. Keying by the lowercased leaf and
+// keeping the first occurrence (order-preserving) yields stable, readable
+// titles/labels and also improves docs verification, which matches on the
+// leaf token rather than a dotted path.
+function canonicalizeProperties(names) {
+  const byLeaf = new Map(); // leafLower -> chosen display form
+  for (const raw of names || []) {
+    if (!raw) continue;
+    let name = raw;
+    // Strip any number of leading `properties.` segments.
+    while (/^properties\./i.test(name)) name = name.slice('properties.'.length);
+    if (!name) continue;
+    const leaf = name.split('.').pop();
+    if (!leaf) continue;
+    const key = leaf.toLowerCase();
+    if (!byLeaf.has(key)) byLeaf.set(key, leaf);
+  }
+  return [...byLeaf.values()];
 }
 
 // Build a set of "off-limits" tokens dynamically: any segment of a
@@ -266,8 +300,11 @@ function extractPropertyCandidates(text, excludeNames) {
       addCandidate(cm[1], winStart + cm.index, false);
     }
   }
-  // Also catch "missing <camelCaseName>" shorthand.
-  const shorthandRe = /\bmissing\s+[`'"]?([a-z][a-zA-Z0-9]*[A-Z][A-Za-z0-9]{2,})[`'"]?\b/g;
+  // Also catch "missing <camelCaseName>" shorthand. Accept either a
+  // camelCase hump (`networkAcls`) OR a lowercase-with-digit identifier
+  // (`oauth2scopes`, `b2cName`) — the digit run is itself enough of an
+  // identifier signal to distinguish a property from a plain English word.
+  const shorthandRe = /\b[Mm]issing\s+[`'"]?([a-z][a-zA-Z0-9]*(?:[A-Z][A-Za-z0-9]{2,}|[0-9][A-Za-z]{2,}))[`'"]?\b/g;
   let sm;
   while ((sm = shorthandRe.exec(text)) !== null) {
     const name = sm[1];
@@ -285,7 +322,7 @@ function extractPropertyCandidates(text, excludeNames) {
   // would otherwise be dropped. Requiring the camelCase shape
   // (lowercase start + an internal uppercase hump) keeps this from
   // firing on ordinary prose words before "missing".
-  const shorthandRe2 = /\b([a-z][a-zA-Z0-9]*[A-Z][A-Za-z0-9]{2,})[`'"]?\s+(?:is\s+|are\s+|was\s+|were\s+)?missing\b/g;
+  const shorthandRe2 = /\b([a-z][a-zA-Z0-9]*(?:[A-Z][A-Za-z0-9]{2,}|[0-9][A-Za-z]{2,}))[`'"]?\s+(?:is\s+|are\s+|was\s+|were\s+)?[Mm]issing\b/g;
   let sm2;
   while ((sm2 = shorthandRe2.exec(text)) !== null) {
     const name = sm2[1];
@@ -447,7 +484,7 @@ function extractAllMissingProperties(title, body, types) {
   // If either high-confidence layer named properties, trust ONLY those.
   // Don't augment with prose-mined identifiers that tend to pull noise
   // words ("However", "Code", "Error") out of surrounding sentences.
-  if (out.length > 0) return out;
+  if (out.length > 0) return canonicalizeProperties(out);
   // Structured "properties:" list in prose (indented enumeration)
   // — e.g. `properties:` followed by indented `parameterValueType`
   // / `alternativeParameterValues`. High confidence: return ONLY
@@ -458,7 +495,7 @@ function extractAllMissingProperties(title, body, types) {
     const k = p.toLowerCase();
     if (!exclude.has(k) && !seen.has(k)) { seen.add(k); out.push(p); }
   }
-  if (out.length > 0) return out;
+  if (out.length > 0) return canonicalizeProperties(out);
   const layers = [
     stripTitlePrefix(title),
     stripCode(body || ''),
@@ -478,7 +515,7 @@ function extractAllMissingProperties(title, body, types) {
     const fb = extractInvertedFallback(fullText, exclude);
     if (fb) out.push(fb);
   }
-  return out;
+  return canonicalizeProperties(out);
 }
 
 // Strip fenced/inline code blocks so extraction doesn't pull identifiers
@@ -927,6 +964,7 @@ function compareTypeVersions(a, b) {
 export {
   classify,
   extractAllMissingProperties,
+  canonicalizeProperties,
   extractErrorPatterns,
   extractApiVersion,
   normalizeNs,
@@ -1078,6 +1116,75 @@ async function fetchDocsText(type, preferVersion) {
   return { url: null, status: 404, text: null };
 }
 
+// #2: Given a resource type + property names the reporter says are missing
+// at their pinned version, find the NEWEST generated API version whose
+// scoped schema contains ALL of those properties. Used to turn a dead-end
+// `missing property` into an actionable "available in <newer version>"
+// hint. Returns { version, url } or null. Reuses the same listing/fetch
+// helpers and version ranking as fetchDocsText.
+async function findPropertyInNewerVersion(type, propertyNames, requestedVersion) {
+  const parts = type.split('/');
+  if (parts.length < 2 || !/^Microsoft\./i.test(parts[0])) return null;
+  const namespace = parts[0].toLowerCase();
+  const slug = namespace.replace(/^microsoft\./, '');
+  const generated = await listGenerated();
+  const slugRe = new RegExp(`^${slug.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}(_\\d+)?$`);
+  const candidates = generated.filter(n => slugRe.test(n));
+  if (!candidates.length) return null;
+  const all = [];
+  for (const folder of candidates) {
+    const entries = await listContents(`generated/${folder}`);
+    const nsDir = entries.find(e => e.type === 'dir' && e.name.toLowerCase() === namespace);
+    if (!nsDir) continue;
+    const versions = await listContents(`generated/${folder}/${nsDir.name}`);
+    for (const v of versions) if (v.type === 'dir') all.push({ folder, nsDir: nsDir.name, v: v.name });
+  }
+  if (!all.length) return null;
+  all.sort((a, b) => compareTypeVersions(a.v, b.v)); // newest first
+  const escType = type.replace(/[.*+?^${}()|[\]\\/]/g, '\\$&');
+  const markerRe = new RegExp(`^## Resource ${escType}@`, 'im');
+  const BATCH = 6;
+  for (let i = 0; i < all.length; i += BATCH) {
+    const batch = all.slice(i, i + BATCH);
+    const fetched = await Promise.all(batch.map(c => fetchTypesMd(c.folder, c.nsDir, c.v)));
+    for (let j = 0; j < batch.length; j++) {
+      const res = fetched[j], cand = batch[j];
+      if (!res.text || !markerRe.test(res.text)) continue;
+      // Only interested in versions strictly NEWER than the reporter's.
+      if (requestedVersion && compareTypeVersions(cand.v, requestedVersion) >= 0) continue;
+      const scoped = scopeToResourceType(res.text, type, cand.v) || res.text;
+      if (propertyNames.every(n => pageHasWord(scoped, n))) {
+        return {
+          version: cand.v,
+          url: `https://github.com/${TYPES_REPO}/blob/${TYPES_BRANCH}/generated/${cand.folder}/${cand.nsDir}/${cand.v}/types.md`,
+        };
+      }
+    }
+  }
+  return null;
+}
+
+
+async function withRetry(fn, { tries = 4, baseMs = 1000, label = 'api' } = {}) {
+  let lastErr;
+  for (let attempt = 0; attempt < tries; attempt++) {
+    try {
+      return await fn();
+    } catch (e) {
+      lastErr = e;
+      const status = e && e.status;
+      const isRate = status === 403 || status === 429 ||
+        /secondary rate limit|abuse detection|rate limit/i.test((e && e.message) || '');
+      if (!isRate || attempt === tries - 1) throw e;
+      const retryAfter = Number(e && e.response && e.response.headers &&
+        e.response.headers['retry-after']) || 0;
+      const delay = retryAfter > 0 ? retryAfter * 1000 : baseMs * Math.pow(2, attempt);
+      core.warning(`${label}: rate-limited (status=${status}); retrying in ${delay}ms (attempt ${attempt + 1}/${tries}).`);
+      await new Promise(r => setTimeout(r, delay));
+    }
+  }
+  throw lastErr;
+}
 
 async function ensureLabel(label, description) {
   try {
@@ -1126,6 +1233,20 @@ const action = context.payload.action;
 
 if (issue.state === 'closed') {
   core.info('Issue already closed, skipping.');
+  return;
+}
+
+// Re-entrancy guard: when THIS bot renames a title or toggles a label it
+// fires another `issues.edited`/`labeled` event, which would re-run triage
+// on our own output. Those self-triggered runs are redundant (the logic is
+// idempotent, but they burn Actions minutes and API quota). Skip them by
+// detecting our own actor. A human editing the issue still triggers a run
+// normally.
+const sender = context.payload.sender || {};
+const selfActor = sender.type === 'Bot' &&
+  /^(github-actions(\[bot\])?|.*\[bot\])$/i.test(sender.login || '');
+if (selfActor && action !== 'opened' && action !== 'reopened') {
+  core.info(`Edit was made by the bot itself (${sender.login}); skipping self-triggered run.`);
   return;
 }
 
@@ -1242,12 +1363,18 @@ const alreadyTriaged = priorComments.some(c =>
 
 // --- Property verification against generated types (only when we have named properties + a type) ---
 // propertyVerification: { found: bool, url, type, version, property, results: [{name, found}] }
+// Walk EVERY extracted type (not just the first): a property the reporter
+// named may live on the second/third type mentioned in the issue. Prefer a
+// type that confirms all properties AT the user's version; otherwise fall
+// back to the first type that had a resolvable schema (back-compat with the
+// old single-type behaviour).
 let propertyVerification = null;
 if (cls.hasMissingPropertyLanguage && cls.propertyNames.length > 0 && cls.types.length > 0) {
-  const t = cls.types[0];
-  const docs = await fetchDocsText(t, cls.apiVersion);
-  core.info(`Types fetch for ${t} (requested=${cls.apiVersion || 'n/a'}): status=${docs.status} resolved=${docs.version || 'n/a'} matched=${docs.versionMatched} length=${docs.text ? docs.text.length : 0}`);
-  if (docs.text) {
+  let fallback = null;
+  for (const t of cls.types) {
+    const docs = await fetchDocsText(t, cls.apiVersion);
+    core.info(`Types fetch for ${t} (requested=${cls.apiVersion || 'n/a'}): status=${docs.status} resolved=${docs.version || 'n/a'} matched=${docs.versionMatched} length=${docs.text ? docs.text.length : 0}`);
+    if (!docs.text) continue;
     // Restrict the property search to ONLY this resource type's
     // schema (its section + the object types it references) so a
     // property defined on a different resource in the same
@@ -1257,7 +1384,7 @@ if (cls.hasMissingPropertyLanguage && cls.propertyNames.length > 0 && cls.types.
     const scoped = scopeToResourceType(docs.text, t, docs.version) || docs.text;
     const results = cls.propertyNames.map(n => ({ name: n, found: pageHasWord(scoped, n) }));
     const allFound = results.every(r => r.found);
-    propertyVerification = {
+    const pv = {
       found: allFound,
       url: docs.url,
       type: t,
@@ -1268,7 +1395,11 @@ if (cls.hasMissingPropertyLanguage && cls.propertyNames.length > 0 && cls.types.
       results,
     };
     core.info(`Property check for ${t}@${docs.version}: ${results.map(r => `${r.name}=${r.found}`).join(', ')}`);
+    // A confident hit at the user's version wins immediately.
+    if (allFound && docs.versionMatched !== false) { propertyVerification = pv; break; }
+    if (!fallback) fallback = pv;
   }
+  if (!propertyVerification) propertyVerification = fallback;
 }
 
 // --- Compose labels ---
@@ -1313,6 +1444,27 @@ if (cls.hasMissingPropertyLanguage) {
   }
 }
 
+// #2: When the property is NOT confirmed at the reporter's pinned version,
+// check whether a NEWER API version exposes it. If so, that's the real,
+// actionable answer ("bump your apiVersion") — flag it and surface the
+// version + link in a comment. Only worth the extra fetches when the user
+// actually pinned a version and we have both a type and property names.
+let newerVersionHit = null;
+if (cls.hasMissingPropertyLanguage &&
+    !(propertyVerification && propertyVerification.found && propertyVerification.versionMatched !== false) &&
+    cls.apiVersion && cls.types.length > 0 && cls.propertyNames.length > 0) {
+  try {
+    const verifyType = (propertyVerification && propertyVerification.type) || cls.types[0];
+    newerVersionHit = await findPropertyInNewerVersion(verifyType, cls.propertyNames, cls.apiVersion);
+  } catch (e) {
+    core.warning(`findPropertyInNewerVersion failed: ${e.message}`);
+  }
+  if (newerVersionHit) {
+    labelsToApply.add('available in newer version');
+    core.info(`Property available in newer version ${newerVersionHit.version} (reporter pinned ${cls.apiVersion}).`);
+  }
+}
+
 // --- Duplicate detection ---
 // Only run for `missing property` or `type issue` categories,
 // matching on same resource type + same property name (case-insensitive).
@@ -1324,6 +1476,7 @@ if (cls.hasMissingPropertyLanguage) {
 const isPropOrTypeIssue = cls.hasMissingPropertyLanguage || cls.hasTypeIssueLanguage;
 let duplicateMatches = []; // array of { number, createdAt, reason }
 const currentTypesLower = new Set(cls.types.map(t => t.toLowerCase()));
+const currentPropsLower = new Set((cls.propertyNames || []).map(p => p.toLowerCase()));
 const shouldCheckDupes =
   isPropOrTypeIssue &&
   cls.types.length > 0 &&
@@ -1341,9 +1494,12 @@ if (shouldCheckDupes) {
   if (cls.hasTypeIssueLanguage) dupeBuckets.push('type issue');
   const openByNumber = new Map();
   for (const lbl of dupeBuckets) {
-    const page = await github.paginate(github.rest.issues.listForRepo, {
-      owner, repo, state: 'open', labels: lbl, per_page: 100,
-    });
+    const page = await withRetry(
+      () => github.paginate(github.rest.issues.listForRepo, {
+        owner, repo, state: 'open', labels: lbl, per_page: 100,
+      }),
+      { label: `listForRepo(${lbl})` }
+    );
     for (const it of page) openByNumber.set(it.number, it);
   }
   const allOpen = [...openByNumber.values()];
@@ -1360,12 +1516,17 @@ if (shouldCheckDupes) {
     if (!sameCategory) continue;
     const sharedType = otherCls.types.find(t => currentTypesLower.has(t.toLowerCase()));
     if (!sharedType) continue;
-    if (otherCls.propertyName &&
-        otherCls.propertyName.toLowerCase() === cls.propertyName.toLowerCase()) {
+    // Match on ANY shared property (case-insensitive), not just each
+    // issue's first-extracted one — a multi-property report and a
+    // single-property report about the same missing property are still
+    // duplicates even when their property LISTS differ in order/length.
+    const sharedProp = (otherCls.propertyNames || [])
+      .find(p => currentPropsLower.has(p.toLowerCase()));
+    if (sharedProp) {
       duplicateMatches.push({
         number: other.number,
         createdAt: other.created_at,
-        reason: `same type \`${sharedType}\` and same property \`${cls.propertyName}\``,
+        reason: `same type \`${sharedType}\` and shared property \`${sharedProp}\``,
       });
     }
   }
@@ -1417,6 +1578,12 @@ await removeLabelIf('types unavailable');
 if (!labelsToApply.has('type issue')) await removeLabelIf('type issue');
 if (!labelsToApply.has('inaccurate description')) await removeLabelIf('inaccurate description');
 if (!labelsToApply.has('bug')) await removeLabelIf('bug');
+// Strip stale `available in newer version` when this run didn't find one
+// (e.g. the property is now present at the reporter's version, or the
+// reporter changed their pinned version).
+if (!labelsToApply.has('available in newer version')) {
+  await removeLabelIf('available in newer version');
+}
 // Strip stale `possible-duplicate` when this issue's category no
 // longer qualifies for dedupe (i.e. it's neither missing-property
 // nor type-issue). If dedupe DID run and found nothing, also strip.
@@ -1496,16 +1663,23 @@ if (cls.propertyNames.length > 0 && cls.types.length > 0 &&
 } else if (titleIsBotGeneric && cls.types.length > 0 &&
            !cls.hasMissingPropertyLanguage && !cls.hasTypeUnavailableLanguage &&
            !cls.hasTypeIssueLanguage && !cls.hasDescriptionIssueLanguage) {
-  // The title is a stale bot-generated generic but the issue no
-  // longer classifies into any schema category (e.g. reclassified as
-  // an uncategorized/bug report). Reset it to a plain resource-typed
-  // title so a wrong category word ("Missing property") doesn't linger.
-  const target = `[${cls.types[0]}]: Needs triage`;
-  if (issue.title !== target) {
+  // The title is a stale bot-generated generic but the issue no longer
+  // classifies into any schema category (e.g. reclassified as an
+  // uncategorized/bug report). Rather than overwrite it with a bot
+  // placeholder like "Needs triage" — which reads oddly to reporters and
+  // buries the resource type — restore the reporter's ORIGINAL pre-rename
+  // title when we can recover one that isn't itself a bot generic. If we
+  // can't recover a clean original, leave the current title untouched.
+  const originalIsBotGeneric =
+    /^\s*\[Microsoft\.[^\]]+\]:\s+(?:Missing property|Type is unavailable|Type issue|Inaccurate\/confusing description|Needs triage)\s*$/i
+      .test(originalTitle || '');
+  if (originalTitle && originalTitle !== issue.title && !originalIsBotGeneric) {
     await github.rest.issues.update({
-      owner, repo, issue_number: num, title: target,
+      owner, repo, issue_number: num, title: originalTitle,
     });
-    core.info(`Reset stale bot-generic title to: ${target}`);
+    core.info(`Restored reporter's original title: ${originalTitle}`);
+  } else {
+    core.info('Stale bot-generic title but no clean original to restore; leaving title unchanged.');
   }
 } else if (titleIsPlaceholder &&
            (cls.hasMissingPropertyLanguage || cls.hasTypeUnavailableLanguage || cls.hasTypeIssueLanguage) &&
@@ -1573,6 +1747,23 @@ if (propertyVerification && propertyVerification.found &&
     `${propertyVerification.url}\n\n` +
     `Could you double-check spelling and the API version you're targeting? ` +
     `If the property is working for you, feel free to close.`
+  );
+}
+
+// "Available in a newer API version" comment. When the property is missing
+// at the reporter's pinned version but present in a newer one, tell them
+// exactly which version exposes it — the actionable fix is to bump the
+// apiVersion. Mutually exclusive with the "property found" block above
+// (that only fires when verified AT the user's version).
+if (newerVersionHit) {
+  const names = cls.propertyNames;
+  const list = names.map(p => `\`${p}\``).join(', ');
+  const plural = names.length > 1;
+  commentBlocks.push(
+    `The propert${plural ? 'ies' : 'y'} ${list} ${plural ? 'appear' : 'appears'} to be ` +
+    `**available in a newer API version**: \`${newerVersionHit.version}\` ` +
+    `(you referenced \`${cls.apiVersion}\`).\n\n${newerVersionHit.url}\n\n` +
+    `If you can target \`${newerVersionHit.version}\`, ${plural ? 'they' : 'it'} should be available there.`
   );
 }
 
