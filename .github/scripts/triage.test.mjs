@@ -4,6 +4,9 @@ import assert from 'node:assert/strict';
 import {
   run,
   classify,
+  extractAllMissingProperties,
+  canonicalizeProperties,
+  isPlausiblePropertyName,
   extractApiVersion,
   normalizeNs,
   pageHasWord,
@@ -153,6 +156,59 @@ test('ranks GA above preview of the same date (newest-first sort)', () => {
 test('ranks newer date first regardless of stage', () => {
   const sorted = ['2023-01-01', '2025-01-01-preview', '2024-01-01'].sort(compareTypeVersions);
   assert.deepEqual(sorted, ['2025-01-01-preview', '2024-01-01', '2023-01-01']);
+});
+
+// --- quality-v2: property canonicalization (#1) -----------------------------
+
+test('canonicalizeProperties strips the noise "properties." prefix', () => {
+  assert.deepEqual(canonicalizeProperties(['properties.accessTier']), ['accessTier']);
+});
+
+test('canonicalizeProperties collapses bare + dotted forms of one leaf', () => {
+  const out = canonicalizeProperties([
+    'disablePasswordAuthentication',
+    'linuxConfiguration.disablePasswordAuthentication',
+    'properties.osProfile.linuxConfiguration.disablePasswordAuthentication',
+  ]);
+  assert.deepEqual(out, ['disablePasswordAuthentication']);
+});
+
+test('canonicalizeProperties preserves distinct leaves in first-seen order', () => {
+  const out = canonicalizeProperties([
+    'properties.IpConfigurations',
+    'privateIPAllocationMethod',
+    'properties.privateIPAllocationMethod',
+  ]);
+  assert.deepEqual(out, ['IpConfigurations', 'privateIPAllocationMethod']);
+});
+
+// --- quality-v2: hyphenated tokens rejected (#3) ----------------------------
+
+test('isPlausiblePropertyName rejects hyphenated CLI-flag tokens', () => {
+  assert.equal(isPlausiblePropertyName('what-if'), false);
+  assert.equal(isPlausiblePropertyName('api-version'), false);
+  assert.equal(isPlausiblePropertyName('accessTier'), true);
+});
+
+test('hyphenated repro tokens do not leak into extracted properties', () => {
+  const body = 'When I run bicep with --what-if the disablePasswordAuthentication property is missing.';
+  const props = extractAllMissingProperties('', body, ['Microsoft.Compute/virtualMachines']);
+  assert.ok(props.includes('disablePasswordAuthentication'));
+  assert.ok(!props.some(p => p.includes('-')), `no hyphenated tokens, got ${JSON.stringify(props)}`);
+});
+
+// --- quality-v2: lowercase+digit title shorthand (#4) -----------------------
+
+test('extracts a lowercase-with-digit property from a capitalized title shorthand', () => {
+  // Regression for #547 ("Missing oauth2scopes") — the keyword "Missing" is
+  // capitalized and the identifier has no uppercase hump, only a digit.
+  const props = extractAllMissingProperties('Missing oauth2scopes', '', ['Microsoft.Graph/applications']);
+  assert.deepEqual(props, ['oauth2scopes']);
+});
+
+test('camelCase title shorthand still extracts (no regression)', () => {
+  const props = extractAllMissingProperties('Missing networkAcls', '', ['Microsoft.Storage/storageAccounts']);
+  assert.deepEqual(props, ['networkAcls']);
 });
 
 // --- pageHasWord() ----------------------------------------------------------
