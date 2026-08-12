@@ -650,6 +650,40 @@ const DEFINITIVELY_BUG_REGEXES = [
   /\bnot\s+scalable\b/i,
 ];
 
+// Language indicating a property is marked with the wrong read-only /
+// write-only mutability — the Azure issue-template's "Property(s)
+// inaccurately marked read-only/write-only" and "Property(s) should be
+// marked as read-only/write-only" buckets. Kept high-precision: we only
+// match phrasings that assert a mutability MISTAKE, not any casual
+// mention of `readOnly`.
+const READWRITE_ONLY_REGEXES = [
+  /\b(?:marked|flagged|set|treated|exposed|defined)\s+(?:as\s+)?(?:read-?only|write-?only)\b/i,
+  /\bshould\s+(?:be\s+)?(?:marked\s+(?:as\s+)?)?(?:read-?only|write-?only|writable|writeable|mutable|settable)\b/i,
+  /\b(?:incorrectly|wrongly|inaccurately|erroneously|mistakenly)\s+(?:marked\s+(?:as\s+)?)?(?:read-?only|write-?only)\b/i,
+  /\b(?:read-?only|write-?only)\s+but\s+(?:should|can|it|is|shouldn|it['']?s)\b/i,
+];
+
+// Language indicating an idempotency problem: re-deploying the same
+// template changes/recreates resources or errors on the second run.
+// The word "idempotent"/"idempotency" is itself an unambiguous, very
+// high-precision signal for this concept.
+const IDEMPOTENCY_REGEXES = [
+  /\bidempoten\w*/i,
+];
+
+// Language indicating a deployment-time problem where the TYPE itself is
+// fine but the resource fails to deploy, surfaces a confusing error, or a
+// property has no effect at deploy time — the Azure issue-template's
+// "Resource fails to deploy", "Confusing error message on deployment",
+// and "Property(s) do not have expected effect on deployment" buckets.
+const DEPLOYMENT_REGEXES = [
+  /\b(?:resource\s+)?fail(?:s|ed|ing)?\s+to\s+deploy\b/i,
+  /\bdeployment\s+(?:fail|fails|failed|failing)\b/i,
+  /\bconfusing\s+error\s+(?:message\s+)?(?:on|during|at)\s+deployment\b/i,
+  /\b(?:no|not|without)\s+(?:having\s+)?(?:the\s+)?expected\s+effect\s+on\s+deployment\b/i,
+  /\bdo(?:es)?\s+not\s+have\s+(?:the\s+)?expected\s+effect\s+on\s+deployment\b/i,
+];
+
 function normalizeNs(raw) {
   const suffix = raw.slice('Microsoft.'.length);
   const uniform = suffix === suffix.toLowerCase() || suffix === suffix.toUpperCase();
@@ -748,6 +782,10 @@ function classify(text, opts) {
     if (!m) return null;
     const v = m[1].trim().toLowerCase();
     if (!v) return null;
+    // Read-only / write-only mutability (both "inaccurately marked" and
+    // "should be marked as" template variants). Checked first so the
+    // shared word "inaccurate" can't misroute it elsewhere.
+    if (/read-?only|write-?only/.test(v)) return 'readwrite-only';
     if (/\btype\s+is\s+unavailable\b/.test(v) ||
         /\btype\s+(?:not|un)available\b/.test(v)) return 'type-unavailable';
     if (/\bmissing\s+propert/.test(v)) return 'missing-property';
@@ -757,6 +795,12 @@ function classify(text, opts) {
     if (/\btype\s+(?:is\s+)?(?:incorrect|wrong|inaccurate)\b/.test(v) ||
         /\binaccurate\s+propert(?:y|ies)?\s+type/.test(v)) return 'type-issue';
     if (/^bug\b/.test(v)) return 'bug';
+    // Deployment-time buckets: "Resource fails to deploy", "Confusing
+    // error message on deployment", "Property(s) do not have expected
+    // effect on deployment". Checked last so more specific schema
+    // categories win first.
+    if (/fails?\s+to\s+deploy|error\s+message\s+on\s+deployment|expected\s+effect\s+on\s+deployment/.test(v))
+      return 'deployment';
     return null;
   })();
 
@@ -858,6 +902,29 @@ function classify(text, opts) {
     hasDescriptionIssue = false;
   }
 
+  // Read-only / write-only mutability mistake. Template selection is
+  // authoritative; prose regexes catch it when the reporter didn't use
+  // the template.
+  const hasReadWriteOnly =
+    tmplIssueType === 'readwrite-only' ||
+    READWRITE_ONLY_REGEXES.some(r => r.test(bodyProse)) ||
+    READWRITE_ONLY_REGEXES.some(r => r.test(title || ''));
+
+  // Idempotency problem — its own bucket, separate from deployment.
+  const hasIdempotency =
+    IDEMPOTENCY_REGEXES.some(r => r.test(bodyProse)) ||
+    IDEMPOTENCY_REGEXES.some(r => r.test(title || ''));
+
+  // Deployment-time failure / no-effect. Template selection is
+  // authoritative; prose regexes catch untemplated reports. Idempotency
+  // takes precedence: a "not idempotent" report is labeled `idempotency
+  // issue`, never `deployment issue`.
+  let hasDeployment =
+    tmplIssueType === 'deployment' ||
+    DEPLOYMENT_REGEXES.some(r => r.test(bodyProse)) ||
+    DEPLOYMENT_REGEXES.some(r => r.test(title || ''));
+  if (hasIdempotency) hasDeployment = false;
+
   return {
     rps: [...rpMap.values()],
     types,
@@ -866,6 +933,9 @@ function classify(text, opts) {
     hasTypeUnavailableLanguage: hasTypeUnavail,
     hasDescriptionIssueLanguage: hasDescriptionIssue,
     hasBugLanguage: hasBug,
+    hasReadWriteOnlyLanguage: hasReadWriteOnly,
+    hasIdempotencyLanguage: hasIdempotency,
+    hasDeploymentLanguage: hasDeployment,
     propertyName,
     propertyNames,
     apiVersion: extractApiVersion(title, body),
@@ -1349,7 +1419,7 @@ core.info(
   `Extracted rps=[${cls.rps.join(', ')}] types=[${cls.types.join(', ')}] ` +
   `keywordRps=[${keywordRps.join(', ')}] primaryRps=[${primaryRps.join(', ')}] ` +
   `typeIssue=${cls.hasTypeIssueLanguage} typeUnavail=${cls.hasTypeUnavailableLanguage} missingProp=${cls.hasMissingPropertyLanguage} ` +
-  `bug=${cls.hasBugLanguage} properties=${(cls.propertyNames || []).join(',')} ` +
+  `bug=${cls.hasBugLanguage} rwOnly=${cls.hasReadWriteOnlyLanguage} idempotency=${cls.hasIdempotencyLanguage} deployment=${cls.hasDeploymentLanguage} properties=${(cls.propertyNames || []).join(',')} ` +
   `apiVersion=${cls.apiVersion || ''}`
 );
 
@@ -1422,6 +1492,21 @@ if (cls.hasTypeUnavailableLanguage) {
 
 if (cls.hasBugLanguage) {
   labelsToApply.add('bug');
+}
+
+if (cls.hasReadWriteOnlyLanguage) {
+  labelsToApply.add('read-only/write-only');
+}
+
+// Idempotency is its own bucket and takes precedence over the generic
+// deployment label (hasDeploymentLanguage is already suppressed when
+// idempotency is detected).
+if (cls.hasIdempotencyLanguage) {
+  labelsToApply.add('idempotency issue');
+}
+
+if (cls.hasDeploymentLanguage) {
+  labelsToApply.add('deployment issue');
 }
 
 if (cls.hasMissingPropertyLanguage) {
@@ -1578,6 +1663,9 @@ await removeLabelIf('types unavailable');
 if (!labelsToApply.has('type issue')) await removeLabelIf('type issue');
 if (!labelsToApply.has('inaccurate description')) await removeLabelIf('inaccurate description');
 if (!labelsToApply.has('bug')) await removeLabelIf('bug');
+if (!labelsToApply.has('read-only/write-only')) await removeLabelIf('read-only/write-only');
+if (!labelsToApply.has('idempotency issue')) await removeLabelIf('idempotency issue');
+if (!labelsToApply.has('deployment issue')) await removeLabelIf('deployment issue');
 // Strip stale `available in newer version` when this run didn't find one
 // (e.g. the property is now present at the reporter's version, or the
 // reporter changed their pinned version).

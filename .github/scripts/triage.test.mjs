@@ -240,3 +240,52 @@ test('scopes a types.md to a single resource and its referenced types', () => {
   assert.ok(pageHasWord(scoped, 'networkAcls'), 'includes referenced object type');
   assert.equal(pageHasWord(scoped, 'shouldNotLeak'), false, 'excludes unrelated resource');
 });
+
+// --- read-only / write-only mutability category -----------------------------
+
+test('classifies the template "Property(s) inaccurately marked read-only/write-only" selection', () => {
+  const body = '### Resource Type\n\nMicrosoft.Storage/storageAccounts\n\n### Issue Type\n\nProperty(s) inaccurately marked read-only/write-only\n\n### Other Notes\n\nThe primaryEndpoints field is settable.';
+  const title = '[Microsoft.Storage/storageAccounts]: read-only mistake';
+  const cls = classify(`${title}\n\n${body}`, { title, body, miningTitle: title });
+  assert.equal(cls.templateIssueType, 'readwrite-only');
+  assert.equal(cls.hasReadWriteOnlyLanguage, true);
+});
+
+test('classifies the template "Property(s) should be marked as read-only/write-only" selection', () => {
+  const body = '### Issue Type\n\nProperty(s) should be marked as read-only/write-only\n\n### Resource Type\n\nMicrosoft.Web/sites';
+  const cls = classify(body, { title: 'x', body });
+  assert.equal(cls.templateIssueType, 'readwrite-only');
+  assert.equal(cls.hasReadWriteOnlyLanguage, true);
+});
+
+test('detects a read-only/write-only issue from prose when no template is used', () => {
+  const body = 'The property status is incorrectly marked read-only but should be writable.';
+  const cls = classify(body, { title: 'mutability', body });
+  assert.equal(cls.hasReadWriteOnlyLanguage, true);
+});
+
+// --- idempotency category ---------------------------------------------------
+
+test('classifies an idempotency issue and keeps it out of the deployment bucket', () => {
+  const body = 'Re-running the same deployment fails to deploy because the resource is not idempotent and gets recreated every time.';
+  const cls = classify(body, { title: 'idempotency', body });
+  assert.equal(cls.hasIdempotencyLanguage, true);
+  assert.equal(cls.hasDeploymentLanguage, false, 'idempotency takes precedence over deployment');
+});
+
+// --- deployment category ----------------------------------------------------
+
+test('classifies the template "Resource fails to deploy" selection', () => {
+  const body = '### Issue Type\n\nResource fails to deploy\n\n### Resource Type\n\nMicrosoft.Web/sites';
+  const cls = classify(body, { title: 'x', body });
+  assert.equal(cls.templateIssueType, 'deployment');
+  assert.equal(cls.hasDeploymentLanguage, true);
+  assert.equal(cls.hasIdempotencyLanguage, false);
+});
+
+test('classifies the template "Property(s) do not have expected effect on deployment" selection', () => {
+  const body = '### Issue Type\n\nProperty(s) do not have expected effect on deployment\n\n### Resource Type\n\nMicrosoft.Storage/storageAccounts';
+  const cls = classify(body, { title: 'x', body });
+  assert.equal(cls.templateIssueType, 'deployment');
+  assert.equal(cls.hasDeploymentLanguage, true);
+});
