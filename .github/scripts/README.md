@@ -141,3 +141,30 @@ npm run test    # node --test              (unit tests for the heuristics)
 Both run automatically in CI
 ([`.github/workflows/triage-ci.yml`](../workflows/triage-ci.yml)) whenever the
 triage scripts change, so a broken export can't reach the live workflow.
+
+### Adding a new issue category
+
+Categories live in one place: the `ISSUE_CATEGORIES` table in `triage.mjs`.
+Classification, label application, and stale-label cleanup are all generic loops
+over that table, so adding a category is a single edit — add an entry:
+
+```js
+{
+  id: 'my-category',              // internal name, used by suppressedBy
+  label: 'my label',              // GitHub label to apply
+  flag: 'hasMyCategoryLanguage',  // key classify() returns
+  templatePatterns: [/my option/],// matches the issue form's "Issue Type" value
+  prosePatterns: MY_REGEXES,      // free-text fallback
+}
+```
+
+Optional fields — `proseScope`, `proseNeedsNoTemplate`, `proseBlockedByTemplate`,
+`suppressedBy`, `detect`, `resolveLabel` — are documented inline above the table.
+
+Two rules to know:
+
+- **Order matters.** Categories are evaluated top to bottom, and `suppressedBy`
+  may only reference a category listed *above* it. A test enforces this.
+- **Labels are re-derived every run.** Any label in `MANAGED_LABELS` that a run
+  doesn't apply is removed as stale, so you never write removal logic. Don't add
+  labels here that humans curate by hand.
