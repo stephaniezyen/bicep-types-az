@@ -103,7 +103,10 @@ const RESOURCE_NOT_FOUND_PATTERNS = [
   /\bResource\s+['"`][^'"`\n]+['"`]?\s+(?:does\s+not\s+exist|was\s+not\s+found|cannot\s+be\s+found)\b/i,
   /\bResource\s+not\s+found\b/i,
   /\bDeploymentFailed\b/,
-  /\b"code"\s*:\s*"NotFound"/i,
+  // No `\b` before the quote: `\b` asserts a word/non-word boundary, and a
+  // quote preceded by whitespace or `{` has non-word on both sides, so the
+  // assertion fails and the pattern never fires on real JSON error payloads.
+  /"code"\s*:\s*"NotFound"/i,
   /\bcode\s*[:=]\s*['"]?NotFound['"]?/i,
 ];
 const RESOURCE_NOT_FOUND_RE = new RegExp(
@@ -111,49 +114,43 @@ const RESOURCE_NOT_FOUND_RE = new RegExp(
   'i'
 );
 
+// Words that look like property names to the prose miner but never are.
+//
+// This list is deliberately SMALL. It only needs to cover tokens that reach
+// `isPlausiblePropertyName` as the last line of defence — most noise is
+// already rejected upstream by stronger, self-maintaining mechanisms:
+//
+//   * `isLikelyIdentifier` + the leading-lowercase check reject bare English
+//     prose words on the unquoted path ("the", "missing", "however", ...).
+//   * `buildExclusions()` dynamically excludes every segment of every
+//     detected resource type, so "storageAccounts", "webTests" and friends
+//     are handled without hardcoding a plural list that would need updating
+//     for each new Azure RP.
+//   * `stripTitlePrefix()` removes "Test:", "Bug:", "WIP:" title tags.
+//   * The window-truncation guard drops partial words sliced by the ±60 char
+//     window ("Microsoft" -> "osoft"), so fragment entries are unnecessary.
+//
+// What remains are tokens that DO slip through: they start lowercase (so they
+// pass the camelCase shape check) and appear next to a property word, usually
+// because a reporter pasted JSON. Every group below has at least one member
+// observed leaking into extracted property names across the real issue corpus.
 const PROPERTY_NAME_STOPWORDS = new Set([
-  'the','a','an','this','that','these','those','my','our','your','their','its','his','her',
-  'one','no','any','some','all','each','every','first','last','new','old','same','other','another',
-  'is','are','was','were','will','should','must','can','may','might','has','have','had','do','does','did',
-  'and','or','but','not','if','when','then','so','because','also','only','just','still','already',
-  'required','optional','important','expected','missing','lack','lacks','lacking',
-  'property','properties','field','fields','attribute','attributes',
-  'type','types','resource','resources','definition','schema','api','for','of','on','in','from','with',
-  'unrecognized','unsupported','allowed','permitted','recognized','supported','accepted','exposed',
-  'value','values','string','strings','int','integer','number','bool','boolean','array',
-  // Literal values and common placeholder identifiers that are never
-  // property names.
-  'true','false','null','undefined','foo','bar','baz','qux','todo','xxx','yyy','zzz',
-  'azure','microsoft','i','it','we','you','they','please','need','want',
-  // Common tag/prefix words found in issue titles like "Test:", "Bug:", "Feature:".
-  'test','tests','testing','bug','bugs','feature','fix','wip','draft','rfc','question','help',
-  'bicep','arm','json','yaml','terraform','template','templates','repro','example','examples',
-  // Common Azure resource-type plural segments that camelCase but aren't properties.
-  'services','workspaces','accounts','storageaccounts','virtualmachines','servers','databases',
-  'webtests','networkinterfaces','components','registrations','registries','vaults',
-  // Common English words that show up as sentence-starters or noise in
-  // issue prose but are not property names.
-  'error','errors','based','however','additionally','note','notes','there','here',
-  'deployment','deployments','deploy','deployed','deploying',
-  'trying','tried','using','used','set','setting','sets',
-  'above','below','following','followed','after','before','during','while',
-  'reference','references','referenced','object','objects',
-  // Product/technology names that commonly appear as prose references.
-  'redis','graph','cosmos','sql','kusto','synapse','fabric','purview',
-  // API/protocol acronyms that show up in prose ("REST API", "SDK", etc.)
-  'rest','apis','sdk','http','https','url','uri',
-  // Partial-word fragments that show up when regex splits on punctuation
-  // (e.g. "ApiCenter services" → "ApiCe").
-  'apice','microsof','azur',
-  // ARM/JSON error-envelope keys. Deployment/preflight errors are pasted
-  // as JSON whose keys (`"message"`, `"code"`, `"target"`, ...) sit right
-  // next to the word "property" (e.g. `"message": "Account property
-  // accessTier is required"`), so the prose miner would otherwise extract
-  // them as property names. These are never Bicep resource properties in
-  // that context.
-  'message','messages','code','codes','target','targets','details','detail',
-  'innererror','correlationid','statuscode','requestid','activityid','timestamp',
-  'additionalinfo','tracking','trackingid',
+  // Schema vocabulary — the words the miner anchors on in the first place.
+  'property', 'properties', 'field', 'fields', 'attribute', 'attributes',
+  'type', 'types', 'resource', 'resources', 'schema', 'definition', 'api', 'apis',
+  // Primitive type names, which appear beside properties in pasted schemas
+  // and error text ("expected string, got int").
+  'string', 'strings', 'int', 'integer', 'number', 'bool', 'boolean',
+  'object', 'objects', 'array', 'value', 'values', 'true', 'false', 'null', 'undefined',
+  // ARM/JSON error-envelope keys. Deployment and preflight errors get pasted
+  // as JSON whose keys sit right next to the word "property" (e.g.
+  // `"message": "Account property accessTier is required"`), so the miner
+  // would otherwise extract the envelope key instead of the real property.
+  'message', 'messages', 'code', 'codes', 'target', 'targets', 'details', 'detail',
+  'innererror', 'correlationid', 'statuscode', 'requestid', 'activityid',
+  'timestamp', 'additionalinfo', 'trackingid',
+  // Generic nouns and protocol acronyms frequently quoted in prose.
+  'error', 'errors', 'test', 'set', 'http', 'https', 'url', 'uri',
 ]);
 
 function isPlausiblePropertyName(name) {
@@ -536,7 +533,11 @@ const TYPE_UNAVAILABLE_REGEXES = [
   /\bno\s+such\s+resource\s+type\b/i,
   /\bunknown\s+resource\s+type\b/i,
   /\bBCP081\b/i,
-  /\bResource\s+type\s+[^\n.]{0,80}\s+does\s+not\s+have\s+types\s+available\b/i,
+  // The gap must allow dots: the type name it spans is always dotted
+  // (`Microsoft.Foo/bar`), so excluding `.` made this unable to match the
+  // very Azure error text it was written for. Excluding only newlines keeps
+  // it anchored to a single line.
+  /\bResource\s+type\s+[^\n]{0,80}?\s+does\s+not\s+have\s+types\s+available\b/i,
   /\b(?:type|types)\s+(?:for|of)\s+[`'"][^`'"\n]+[`'"]\s+(?:are\s+|is\s+)?(?:not\s+)?(?:yet\s+)?(?:available|defined|generated|published)\b/i,
   /\bno\s+types\s+(?:available|defined|generated|published)\b/i,
   /\btypes?\s+(?:not\s+)?(?:yet\s+)?(?:generated|published|defined)\b/i,
