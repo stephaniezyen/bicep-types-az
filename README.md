@@ -9,6 +9,14 @@ Bicep type definitions for ARM resources
 1. To workaround [this issue](https://github.com/peter-evans/create-pull-request/issues/48), close the PR and open it to trigger Merge Validation to run.
 1. Merge the PR. Type differences can be reviewed by looking at the Markdown files in [/generated/docs](./generated/docs).
 
+## Issue triage
+
+Issues in this repo are automatically triaged by a heuristic (no-LLM) bot that
+applies labels, normalizes titles, verifies "missing property" claims against
+the generated schema, and flags likely duplicates. See
+[`.github/scripts/README.md`](./.github/scripts/README.md) for a full
+explanation of what it does and how it works.
+
 ## Contributing
 
 This project welcomes contributions and suggestions.  Most contributions require you to agree to a
