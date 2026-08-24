@@ -684,6 +684,152 @@ const DEPLOYMENT_REGEXES = [
   /\bdo(?:es)?\s+not\s+have\s+(?:the\s+)?expected\s+effect\s+on\s+deployment\b/i,
 ];
 
+// ============================================================================
+// Issue categories — the single source of truth for classification.
+//
+// This one table drives ALL FOUR stages that used to be maintained
+// separately (and had to be kept in sync by hand):
+//   1. Parsing the issue template's `### Issue Type` selection.
+//   2. Detecting the category from free-text prose.
+//   3. Deciding which label to apply.
+//   4. Cleaning up that label when the category no longer applies.
+//
+// To add a category, add ONE entry here. No other file changes are needed.
+//
+// Entries are evaluated IN ORDER, and the first `templatePatterns` match
+// wins — so list more specific categories before more general ones.
+//
+// Fields:
+//   id                     Internal category name (also the value exposed as
+//                          `templateIssueType`).
+//   label                  GitHub label to apply. May be shared by several
+//                          categories (e.g. type-unavailable is folded into
+//                          `missing property`).
+//   flag                   Name of the boolean exposed on the classify()
+//                          result, e.g. `hasBugLanguage`.
+//   templatePatterns       Tested against the LOWERCASED `### Issue Type`
+//                          value the reporter picked.
+//   prosePatterns          Tested against free text when the template didn't
+//                          decide the category.
+//   proseScope             Which text prose patterns run against:
+//                            'stripped'      - body with template/repro
+//                                              sections removed (default)
+//                            'proseAndTitle' - body prose (code stripped)
+//                                              plus the raw title
+//   proseNeedsNoTemplate   Only trust prose when the reporter picked NO
+//                          template value at all. Used by description-issue,
+//                          whose wording overlaps several other categories.
+//   proseBlockedByTemplate Category ids whose explicit template selection
+//                          disables this category's prose matching.
+//   suppressedBy           Other category ids / override signals that force
+//                          this category off when they are present.
+//   resolveLabel           Optional. Returns the label dynamically when it
+//                          depends on schema verification rather than text.
+// ============================================================================
+const ISSUE_CATEGORIES = [
+  {
+    id: 'readwrite-only',
+    label: 'read-only/write-only',
+    flag: 'hasReadWriteOnlyLanguage',
+    templatePatterns: [/read-?only|write-?only/],
+    prosePatterns: READWRITE_ONLY_REGEXES,
+    proseScope: 'proseAndTitle',
+  },
+  {
+    id: 'type-unavailable',
+    // Folded into `missing property`: a whole type being absent and a single
+    // property being absent are the same problem from a user's perspective.
+    label: 'missing property',
+    flag: 'hasTypeUnavailableLanguage',
+    templatePatterns: [/\btype\s+is\s+unavailable\b/, /\btype\s+(?:not|un)available\b/],
+    prosePatterns: TYPE_UNAVAILABLE_REGEXES,
+    suppressedBy: ['definitively-bug'],
+  },
+  {
+    id: 'missing-property',
+    // Detection is bespoke (see detectMissingProperty) because it combines
+    // explicit phrases, structured error patterns, and an ARM
+    // "resource not found" guard. The LABEL is also dynamic: once the
+    // property is verified against the real schema it may become
+    // `property found` instead.
+    label: 'missing property',
+    flag: 'hasMissingPropertyLanguage',
+    templatePatterns: [/\bmissing\s+propert/],
+    detect: 'bespoke',
+    suppressedBy: ['definitively-bug'],
+    resolveLabel: ({ verifiedAtUserVersion }) =>
+      verifiedAtUserVersion ? 'property found' : 'missing property',
+  },
+  {
+    id: 'description-issue',
+    label: 'inaccurate description',
+    flag: 'hasDescriptionIssueLanguage',
+    // Listed before type-issue: both templates contain the word
+    // "inaccurate", so description must get first refusal.
+    templatePatterns: [/description/],
+    prosePatterns: DESCRIPTION_ISSUE_REGEXES,
+    proseNeedsNoTemplate: true,
+    suppressedBy: ['definitively-bug'],
+  },
+  {
+    id: 'type-issue',
+    label: 'type issue',
+    flag: 'hasTypeIssueLanguage',
+    templatePatterns: [
+      /\btype\s+(?:is\s+)?(?:incorrect|wrong|inaccurate)\b/,
+      /\binaccurate\s+propert(?:y|ies)?\s+type/,
+    ],
+    prosePatterns: TYPE_ISSUE_REGEXES,
+    proseBlockedByTemplate: ['description-issue'],
+    suppressedBy: ['definitively-bug', 'definitively-missing'],
+  },
+  {
+    id: 'bug',
+    label: 'bug',
+    flag: 'hasBugLanguage',
+    templatePatterns: [/^bug\b/],
+    prosePatterns: BUG_REGEXES,
+  },
+  {
+    id: 'idempotency',
+    label: 'idempotency issue',
+    flag: 'hasIdempotencyLanguage',
+    // No template bucket exists for idempotency; it is prose-only.
+    templatePatterns: [],
+    prosePatterns: IDEMPOTENCY_REGEXES,
+    proseScope: 'proseAndTitle',
+  },
+  {
+    id: 'deployment',
+    label: 'deployment issue',
+    flag: 'hasDeploymentLanguage',
+    // Listed last so the more specific schema categories claim the
+    // template value first.
+    templatePatterns: [
+      /fails?\s+to\s+deploy/,
+      /error\s+message\s+on\s+deployment/,
+      /expected\s+effect\s+on\s+deployment/,
+    ],
+    prosePatterns: DEPLOYMENT_REGEXES,
+    proseScope: 'proseAndTitle',
+    // A non-idempotent re-deploy is its own bucket, never the generic one.
+    suppressedBy: ['idempotency'],
+  },
+];
+
+// Labels the bot owns and will remove once its category stops applying.
+// Anything here that isn't applied on a given run gets stripped, which is
+// what keeps `missing property` / `property found` mutually exclusive
+// without needing pairwise special cases.
+const MANAGED_LABELS = [
+  ...new Set(ISSUE_CATEGORIES.map(c => c.label)),
+  'property found',
+  'available in newer version',
+  // Deprecated: folded into `missing property`. Never applied, always
+  // removed, so old issues get cleaned up as they are re-triaged.
+  'types unavailable',
+];
+
 function normalizeNs(raw) {
   const suffix = raw.slice('Microsoft.'.length);
   const uniform = suffix === suffix.toLowerCase() || suffix === suffix.toUpperCase();
@@ -732,6 +878,36 @@ function extractApiVersion(title, body) {
   return [...counts.entries()].sort((a, b) => b[1] - a[1])[0][0];
 }
 
+// Read the reporter's `### Issue Type` selection and map it to a category id.
+// Accepts both the fenced form (`### Issue Type\n\nValue`) and the inline
+// form (`### Issue Type Value`) — bodies fetched via the API are sometimes
+// flattened onto a single line. Returns null when the template wasn't used.
+function matchTemplateIssueType(text) {
+  const m = /###\s+Issue\s+Type\b[\s:]*([^\r\n#]+?)(?=\s*(?:###|$|\r|\n))/i.exec(text);
+  if (!m) return null;
+  const value = m[1].trim().toLowerCase();
+  if (!value) return null;
+  const hit = ISSUE_CATEGORIES.find(
+    c => (c.templatePatterns || []).some(p => p.test(value))
+  );
+  return hit ? hit.id : null;
+}
+
+// Decide whether one category's prose patterns match. Template selections are
+// handled by the caller; this is purely the free-text fallback.
+function matchesCategoryProse(category, { stripped, bodyProse, title, templateIssueType }) {
+  const patterns = category.prosePatterns || [];
+  if (patterns.length === 0) return false;
+  // Some categories only trust prose when the reporter gave no template
+  // answer, or when they didn't pick a specific conflicting category.
+  if (category.proseNeedsNoTemplate && templateIssueType !== null) return false;
+  if ((category.proseBlockedByTemplate || []).includes(templateIssueType)) return false;
+  const haystacks = category.proseScope === 'proseAndTitle'
+    ? [bodyProse, title || '']
+    : [stripped];
+  return haystacks.some(text => patterns.some(p => p.test(text)));
+}
+
 function classify(text, opts) {
   opts = opts || {};
   const title = opts.title || '';
@@ -768,41 +944,10 @@ function classify(text, opts) {
     .replace(/_No\s+response_/gi, ' ')
     .replace(/###\s+(?:Resource\s+Type|Api\s+Version|Bicep\s+Repro|Confirm|Other\s+Notes)\b/gi, ' ');
   const stripped = stripTemplate(text);
-  const strippedNoCode = stripCode(stripped);
   // -- Explicit user signal: the Azure issue template asks the user
   // to pick an "Issue Type". If they set it, trust that value over
-  // the loose text heuristics. Values seen in practice include
-  // "Missing property(s)", "Type is unavailable", "Type is incorrect",
-  // and "Bug".
-  const tmplIssueType = (() => {
-    // Accept both fenced form (### Issue Type\n\nValue) and inline
-    // form (### Issue Type Value) — GitHub bodies fetched via API
-    // sometimes get flattened onto a single line.
-    const m = /###\s+Issue\s+Type\b[\s:]*([^\r\n#]+?)(?=\s*(?:###|$|\r|\n))/i.exec(text);
-    if (!m) return null;
-    const v = m[1].trim().toLowerCase();
-    if (!v) return null;
-    // Read-only / write-only mutability (both "inaccurately marked" and
-    // "should be marked as" template variants). Checked first so the
-    // shared word "inaccurate" can't misroute it elsewhere.
-    if (/read-?only|write-?only/.test(v)) return 'readwrite-only';
-    if (/\btype\s+is\s+unavailable\b/.test(v) ||
-        /\btype\s+(?:not|un)available\b/.test(v)) return 'type-unavailable';
-    if (/\bmissing\s+propert/.test(v)) return 'missing-property';
-    // "Inaccurate/confusing description(s)" — check BEFORE type-issue so
-    // the shared word "inaccurate" doesn't misroute it to type-issue.
-    if (/description/.test(v)) return 'description-issue';
-    if (/\btype\s+(?:is\s+)?(?:incorrect|wrong|inaccurate)\b/.test(v) ||
-        /\binaccurate\s+propert(?:y|ies)?\s+type/.test(v)) return 'type-issue';
-    if (/^bug\b/.test(v)) return 'bug';
-    // Deployment-time buckets: "Resource fails to deploy", "Confusing
-    // error message on deployment", "Property(s) do not have expected
-    // effect on deployment". Checked last so more specific schema
-    // categories win first.
-    if (/fails?\s+to\s+deploy|error\s+message\s+on\s+deployment|expected\s+effect\s+on\s+deployment/.test(v))
-      return 'deployment';
-    return null;
-  })();
+  // the loose text heuristics.
+  const tmplIssueType = matchTemplateIssueType(text);
 
   // Layered extraction. Pass types so resource-type segments aren't
   // mistaken for property names. Always use the multi-layer extractor
@@ -856,86 +1001,54 @@ function classify(text, opts) {
     }
   }
 
-  // Template value takes precedence over heuristics for the
-  // type-unavailable / type-issue / bug categories too.
-  let hasTypeUnavail =
-    tmplIssueType === 'type-unavailable' ||
-    TYPE_UNAVAILABLE_REGEXES.some(r => r.test(stripped));
-  // Definitively-missing wording (e.g. the Bicep linter phrase
-  // `The property "X" does not exist in the resource or type
-  // definition`) is a strong overriding signal: reclassify as
-  // missing-property and suppress the type-issue label even if the
-  // reporter picked "Inaccurate property type(s)" in the template.
+  // Two override signals quote literal Bicep/ARM diagnostics, so they are
+  // trusted above both the template selection and the prose heuristics.
+  // Each one force-enables its own category and suppresses the categories
+  // that list it in `suppressedBy`.
+  //
+  //   definitively-missing — e.g. `The property "X" does not exist in the
+  //     resource or type definition`: the property is absent, so the report
+  //     is missing-property even if the reporter picked "Inaccurate
+  //     property type(s)".
+  //   definitively-bug — language-limitation cues (wanting to loop over an
+  //     array). These suppress the schema-shaped categories so a Bicep
+  //     language gap isn't filed as a type defect. Note they do NOT by
+  //     themselves apply the `bug` label; that still needs a real bug
+  //     signal.
   const hasDefinitivelyMissing =
     DEFINITIVELY_MISSING_REGEXES.some(r => r.test(bodyProse)) ||
     DEFINITIVELY_MISSING_REGEXES.some(r => r.test(title || ''));
   if (hasDefinitivelyMissing) hasMP = true;
-  let hasTypeIssue =
-    !hasDefinitivelyMissing &&
-    tmplIssueType !== 'description-issue' &&
-    (tmplIssueType === 'type-issue' ||
-     TYPE_ISSUE_REGEXES.some(r => r.test(stripped)));
-  // Description/documentation issue (distinct from a wrong *type*).
-  // Template selection is authoritative; prose regexes catch it when
-  // the reporter didn't use the template.
-  let hasDescriptionIssue =
-    tmplIssueType === 'description-issue' ||
-    (tmplIssueType === null && DESCRIPTION_ISSUE_REGEXES.some(r => r.test(stripped)));
-  let hasBug =
-    tmplIssueType === 'bug' ||
-    BUG_REGEXES.some(r => r.test(stripped));
 
-  // Definitively-bug wording (language-limitation cues like
-  // wanting to loop through an array) suppresses schema-shaped
-  // classifications so we don't mislabel language limitations as
-  // type-issue / type-unavailable / missing-property. We do NOT
-  // auto-apply the `bug` label from these cues alone — bug
-  // classification still requires an explicit BUG_REGEXES match or
-  // the template value.
   const hasDefinitivelyBug =
     DEFINITIVELY_BUG_REGEXES.some(r => r.test(bodyProse)) ||
     DEFINITIVELY_BUG_REGEXES.some(r => r.test(title || ''));
-  if (hasDefinitivelyBug) {
-    hasMP = false;
-    hasTypeIssue = false;
-    hasTypeUnavail = false;
-    hasDescriptionIssue = false;
+
+  // Resolve every category from the ISSUE_CATEGORIES table. Order matters
+  // only for `suppressedBy`, which reads flags decided earlier in the table.
+  const proseContext = { stripped, bodyProse, title, templateIssueType: tmplIssueType };
+  const overrides = {
+    'definitively-missing': hasDefinitivelyMissing,
+    'definitively-bug': hasDefinitivelyBug,
+  };
+  const flags = {};
+  for (const category of ISSUE_CATEGORIES) {
+    // missing-property is detected above by bespoke logic; everything else
+    // is "template said so, or prose matched".
+    let active = category.detect === 'bespoke'
+      ? hasMP
+      : tmplIssueType === category.id || matchesCategoryProse(category, proseContext);
+    const suppressors = category.suppressedBy || [];
+    if (suppressors.some(id => id in overrides ? overrides[id] : flags[id])) {
+      active = false;
+    }
+    flags[category.id] = active;
   }
-
-  // Read-only / write-only mutability mistake. Template selection is
-  // authoritative; prose regexes catch it when the reporter didn't use
-  // the template.
-  const hasReadWriteOnly =
-    tmplIssueType === 'readwrite-only' ||
-    READWRITE_ONLY_REGEXES.some(r => r.test(bodyProse)) ||
-    READWRITE_ONLY_REGEXES.some(r => r.test(title || ''));
-
-  // Idempotency problem — its own bucket, separate from deployment.
-  const hasIdempotency =
-    IDEMPOTENCY_REGEXES.some(r => r.test(bodyProse)) ||
-    IDEMPOTENCY_REGEXES.some(r => r.test(title || ''));
-
-  // Deployment-time failure / no-effect. Template selection is
-  // authoritative; prose regexes catch untemplated reports. Idempotency
-  // takes precedence: a "not idempotent" report is labeled `idempotency
-  // issue`, never `deployment issue`.
-  let hasDeployment =
-    tmplIssueType === 'deployment' ||
-    DEPLOYMENT_REGEXES.some(r => r.test(bodyProse)) ||
-    DEPLOYMENT_REGEXES.some(r => r.test(title || ''));
-  if (hasIdempotency) hasDeployment = false;
 
   return {
     rps: [...rpMap.values()],
     types,
-    hasMissingPropertyLanguage: hasMP,
-    hasTypeIssueLanguage: hasTypeIssue,
-    hasTypeUnavailableLanguage: hasTypeUnavail,
-    hasDescriptionIssueLanguage: hasDescriptionIssue,
-    hasBugLanguage: hasBug,
-    hasReadWriteOnlyLanguage: hasReadWriteOnly,
-    hasIdempotencyLanguage: hasIdempotency,
-    hasDeploymentLanguage: hasDeployment,
+    ...Object.fromEntries(ISSUE_CATEGORIES.map(c => [c.flag, flags[c.id]])),
     propertyName,
     propertyNames,
     apiVersion: extractApiVersion(title, body),
@@ -1033,6 +1146,8 @@ function compareTypeVersions(a, b) {
 
 export {
   classify,
+  ISSUE_CATEGORIES,
+  MANAGED_LABELS,
   extractAllMissingProperties,
   canonicalizeProperties,
   extractErrorPatterns,
@@ -1473,60 +1588,30 @@ if (cls.hasMissingPropertyLanguage && cls.propertyNames.length > 0 && cls.types.
 }
 
 // --- Compose labels ---
+// Driven entirely by the ISSUE_CATEGORIES table: every active category
+// contributes its label. Categories whose label depends on runtime
+// verification (missing-property) supply a resolveLabel() instead.
+//
+// `property found` asserts the property exists AT THE USER'S API version, so
+// we only claim it when we actually verified against that version: either the
+// user pinned no version (verified against latest, versionMatched === null) or
+// their pinned version resolved exactly (versionMatched === true). If they
+// pinned a version we could NOT locate in the generated docs
+// (versionMatched === false) we only checked a DIFFERENT version, so the
+// property isn't confirmed present for them — treat it as missing.
+const verifiedAtUserVersion = Boolean(
+  propertyVerification &&
+  propertyVerification.found &&
+  propertyVerification.versionMatched !== false
+);
+
 const labelsToApply = new Set(primaryRps);
-
-if (cls.hasTypeIssueLanguage) {
-  labelsToApply.add('type issue');
-}
-
-if (cls.hasDescriptionIssueLanguage) {
-  labelsToApply.add('inaccurate description');
-}
-
-if (cls.hasTypeUnavailableLanguage) {
-  // Treat "type unavailable" (whole resource type missing) as the
-  // same taxonomy bucket as "missing property" — both are cases of
-  // Bicep types not exposing something the user needs.
-  labelsToApply.add('missing property');
-}
-
-if (cls.hasBugLanguage) {
-  labelsToApply.add('bug');
-}
-
-if (cls.hasReadWriteOnlyLanguage) {
-  labelsToApply.add('read-only/write-only');
-}
-
-// Idempotency is its own bucket and takes precedence over the generic
-// deployment label (hasDeploymentLanguage is already suppressed when
-// idempotency is detected).
-if (cls.hasIdempotencyLanguage) {
-  labelsToApply.add('idempotency issue');
-}
-
-if (cls.hasDeploymentLanguage) {
-  labelsToApply.add('deployment issue');
-}
-
-if (cls.hasMissingPropertyLanguage) {
-  // `property found` asserts the property exists AT THE USER'S API
-  // version. Only claim it when we actually verified against that
-  // version: either the user pinned no version (verify against latest,
-  // versionMatched === null) or the pinned version resolved exactly
-  // (versionMatched === true). If the user pinned a version we could
-  // NOT locate in the generated docs (versionMatched === false), we
-  // only checked a DIFFERENT version, so the property is not confirmed
-  // present for them — treat it as missing at their version.
-  const verifiedAtUserVersion =
-    propertyVerification &&
-    propertyVerification.found &&
-    propertyVerification.versionMatched !== false;
-  if (verifiedAtUserVersion) {
-    labelsToApply.add('property found');
-  } else {
-    labelsToApply.add('missing property');
-  }
+for (const category of ISSUE_CATEGORIES) {
+  if (!cls[category.flag]) continue;
+  const label = category.resolveLabel
+    ? category.resolveLabel({ verifiedAtUserVersion })
+    : category.label;
+  if (label) labelsToApply.add(label);
 }
 
 // #2: When the property is NOT confirmed at the reporter's pinned version,
@@ -1535,8 +1620,7 @@ if (cls.hasMissingPropertyLanguage) {
 // version + link in a comment. Only worth the extra fetches when the user
 // actually pinned a version and we have both a type and property names.
 let newerVersionHit = null;
-if (cls.hasMissingPropertyLanguage &&
-    !(propertyVerification && propertyVerification.found && propertyVerification.versionMatched !== false) &&
+if (cls.hasMissingPropertyLanguage && !verifiedAtUserVersion &&
     cls.apiVersion && cls.types.length > 0 && cls.propertyNames.length > 0) {
   try {
     const verifyType = (propertyVerification && propertyVerification.type) || cls.types[0];
@@ -1637,8 +1721,13 @@ if (labelArr.length > 0) {
 }
 
 // --- Remove conflicting labels we no longer believe apply ---
-// 'missing property' and 'property found' are mutually exclusive — keep
-// whichever this run chose and strip the other if it lingers from a prior run.
+// Every label the bot owns is re-derived from scratch on each run, so any
+// managed label that this run did NOT apply is stale by definition. That one
+// rule subsumes all the pairwise exclusions (e.g. `missing property` vs
+// `property found`) without enumerating them.
+//
+// Resource-provider labels (`Microsoft.X`) are deliberately NOT managed: they
+// are additive and humans may add more, so we never strip them.
 const existingNames = new Set((issue.labels || []).map(l => (typeof l === 'string' ? l : l.name)));
 async function removeLabelIf(name) {
   if (existingNames.has(name) && !labelsToApply.has(name)) {
@@ -1648,37 +1737,20 @@ async function removeLabelIf(name) {
     } catch (e) { /* 404 is fine */ }
   }
 }
-if (labelsToApply.has('property found')) await removeLabelIf('missing property');
-if (labelsToApply.has('missing property')) await removeLabelIf('property found');
-// If neither classification applies anymore (e.g. previously flagged
-// missing-property but the resource-not-found guard now suppresses it),
-// strip both labels so stale state doesn't linger.
-if (!labelsToApply.has('missing property') && !labelsToApply.has('property found')) {
-  await removeLabelIf('missing property');
-  await removeLabelIf('property found');
+for (const label of MANAGED_LABELS) {
+  await removeLabelIf(label);
 }
-// Always strip the deprecated `types unavailable` label — it's
-// been folded into `missing property`.
-await removeLabelIf('types unavailable');
-if (!labelsToApply.has('type issue')) await removeLabelIf('type issue');
-if (!labelsToApply.has('inaccurate description')) await removeLabelIf('inaccurate description');
-if (!labelsToApply.has('bug')) await removeLabelIf('bug');
-if (!labelsToApply.has('read-only/write-only')) await removeLabelIf('read-only/write-only');
-if (!labelsToApply.has('idempotency issue')) await removeLabelIf('idempotency issue');
-if (!labelsToApply.has('deployment issue')) await removeLabelIf('deployment issue');
-// Strip stale `available in newer version` when this run didn't find one
-// (e.g. the property is now present at the reporter's version, or the
-// reporter changed their pinned version).
-if (!labelsToApply.has('available in newer version')) {
-  await removeLabelIf('available in newer version');
-}
-// Strip stale `possible-duplicate` when this issue's category no
-// longer qualifies for dedupe (i.e. it's neither missing-property
-// nor type-issue). If dedupe DID run and found nothing, also strip.
-const shouldRemoveDupeLabel =
+
+// `possible-duplicate` is the one label we can't re-derive every run: the
+// dedupe scan is skipped for non-property/type issues and can be cut short by
+// rate limits. Absence of a match this run therefore doesn't prove the label
+// is stale, so only strip it when we actually know better — either the issue
+// no longer qualifies for dedupe at all, or the scan ran to completion and
+// found nothing.
+const dedupeVerdictIsTrustworthy =
   !isPropOrTypeIssue ||
   (shouldCheckDupes && duplicateMatches.length === 0);
-if (shouldRemoveDupeLabel && !labelsToApply.has('possible-duplicate')) {
+if (dedupeVerdictIsTrustworthy) {
   await removeLabelIf('possible-duplicate');
 }
 
