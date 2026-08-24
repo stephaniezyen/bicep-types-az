@@ -337,3 +337,35 @@ test('classify returns exactly one flag per category', () => {
       `classify() did not return a boolean for ${c.flag}`);
   }
 });
+
+// --- Regressions found by auditing patterns against the real issue corpus ---
+
+test('type-unavailable matches Azure error text containing a dotted type name', () => {
+  // The gap in this pattern previously excluded ".", so it could never match
+  // the dotted type name it was written to span.
+  const cls = classify(
+    'Resource type "Microsoft.VirtualMachineImages/imageTemplates@2024-02-01" does not have types available'
+  );
+  assert.equal(cls.hasTypeUnavailableLanguage, true);
+});
+
+test('resource-not-found guard matches a JSON NotFound envelope', () => {
+  // `\b` before a quote never matches when the quote follows whitespace, so
+  // this guard silently failed on real payloads.
+  const re = /"code"\s*:\s*"NotFound"/i;
+  assert.equal(re.test('{ "code": "NotFound" }'), true);
+});
+
+test('stopwords still reject ARM error-envelope keys', () => {
+  for (const k of ['message', 'code', 'target', 'details', 'innerError', 'statusCode']) {
+    assert.equal(isPlausiblePropertyName(k), false, `${k} should be filtered`);
+  }
+});
+
+test('stopwords do not reject real single-word ARM properties', () => {
+  // Trimming the stopword list must never swallow legitimate properties that
+  // happen to be ordinary single lowercase words.
+  for (const p of ['kind', 'location', 'sku', 'tags', 'identity', 'zones', 'etag', 'plan']) {
+    assert.equal(isPlausiblePropertyName(p), true, `${p} is a real property`);
+  }
+});
