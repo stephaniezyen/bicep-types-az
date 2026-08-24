@@ -632,8 +632,8 @@ const MANAGED_LABELS = [
   ...new Set(ISSUE_CATEGORIES.map(c => c.label)),
   'property found',
   'available in newer version',
-  // Deprecated: folded into `missing property`. Never applied, always
-  // removed, so old issues get cleaned up as they are re-triaged.
+  // Deprecated (folded into `missing property`): never applied, but kept here
+  // so re-triage strips it from issues labeled before the fold.
   'types unavailable',
 ];
 
@@ -1618,9 +1618,6 @@ if (duplicateMatches.length > 0) {
     `Labeled \`possible-duplicate\` for maintainer review — not auto-closing.`
   );
 }
-
-// (Clarification-request comment removed — too noisy; it fired whenever the
-// classifier couldn't extract a property name, even on clear issues.)
 
 // Only acknowledge on the FIRST triage; skip on retriggers.
 if (commentBlocks.length === 0 && action === 'opened' && !priorBotComment) {
