@@ -403,28 +403,6 @@ function stripCode(text) {
     .replace(/`[^`\n]+`/g, ' ');
 }
 
-// Language indicating "the type itself is unavailable / doesn't exist /
-// hasn't been generated yet". This is distinct from "the type exists but
-// its schema is wrong" (TYPE_ISSUE_REGEXES below).
-const TYPE_UNAVAILABLE_REGEXES = [
-  /\b(?:resource\s+)?type\s+(?:is\s+)?(?:unavailable|not\s+available|not\s+found)\b/i,
-  /\bresource\s+type\s+(?:is\s+)?missing\b/i,
-  /\btype\s+does(?:\s+not|n['']?t)\s+exist\b/i,
-  /\bno\s+such\s+resource\s+type\b/i,
-  /\bunknown\s+resource\s+type\b/i,
-  /\bBCP081\b/i,
-  // The gap must allow dots (the type name it spans is dotted); excluding
-  // only newlines keeps it anchored to a single line.
-  /\bResource\s+type\s+[^\n]{0,80}?\s+does\s+not\s+have\s+types\s+available\b/i,
-  /\b(?:type|types)\s+(?:for|of)\s+[`'"][^`'"\n]+[`'"]\s+(?:are\s+|is\s+)?(?:not\s+)?(?:yet\s+)?(?:available|defined|generated|published)\b/i,
-  /\bno\s+types\s+(?:available|defined|generated|published)\b/i,
-  /\btypes?\s+(?:not\s+)?(?:yet\s+)?(?:generated|published|defined)\b/i,
-  /\bmissing\s+(?:resource\s+)?type\s+definition\b/i,
-  // ARM runtime: "The resource type 'X' could not be found in the namespace 'Y'"
-  /\bresource\s+type\s+["'`][^"'`\n]+["'`]\s+could\s+not\s+be\s+found\s+in\s+the\s+namespace\b/i,
-  /\bcould\s+not\s+be\s+found\s+in\s+the\s+namespace\b/i,
-];
-
 // Explicit "property is missing" phrases — a HIGH-CONFIDENCE missing-property
 // signal, unlike the loose proximity heuristic (MISS_NEAR_PROP).
 const EXPLICIT_MISSING_PROP_REGEXES = [
@@ -457,48 +435,6 @@ const DEFINITIVELY_MISSING_REGEXES = [
   /\bproperty\s+["'`]([A-Za-z_][\w.-]*)["'`]\s+does\s+not\s+exist\s+in\s+the\s+(?:resource\s+(?:or\s+type\s+)?|type\s+)?definition\b/i,
 ];
 
-// Language indicating "the type exists but its schema is wrong".
-// Intentionally separate from missing-property + types-unavailable.
-const TYPE_ISSUE_REGEXES = [
-  /\btype\s+(?:definition\s+)?is\s+(?:wrong|incorrect|inaccurate)/i,
-  /\btype\s+(?:definition\s+)?(?:for|of)\b[^\n]{0,100}?\bis\s+(?:wrong|incorrect|inaccurate)/i,
-  /\b(?:wrong|incorrect|inaccurate)\s+type\s+(?:for|on)\b/i,
-  /\b(?:doesn['']?t|does\s+not|don['']?t|do\s+not)\s+(?:accept|allow)\b/i,
-  /\bshould\s+(?:accept|allow)\b/i,
-  /\brejects?\b[^\n]{0,40}?\b(?:string|int|integer|number|bool|boolean|array|value)\b/i,
-  // Classic Bicep type-mismatch diagnostic.
-  /\bexpected\s+a?\s*value\s+of\s+type\b[^\n]{0,80}?\bprovided\s+value\s+is\s+of\s+type\b/i,
-  // Inline template value.
-  /\binaccurate\s+propert(?:y|ies)?\s+type/i,
-];
-
-// A property's DESCRIPTION is wrong or confusing while the type itself is
-// fine — the template's "Inaccurate/confusing description(s)" bucket. Kept
-// separate from type-issue so it gets its own label.
-const DESCRIPTION_ISSUE_REGEXES = [
-  /\b(?:inaccurate|incomplete|incorrect|wrong|confusing|misleading|unclear|outdated)\s+description\b/i,
-  /\bdescription\s+(?:for|of)\b[^\n]{0,80}?\bis\s+(?:inaccurate|incomplete|incorrect|wrong|confusing|misleading|unclear|outdated|missing)\b/i,
-  /\bdescription\s+(?:is\s+)?(?:inaccurate|incomplete|incorrect|wrong|confusing|misleading|unclear|outdated)\b/i,
-  /\b(?:doc|docs|documentation)\s+(?:for|of|on)\b[^\n]{0,80}?\b(?:is\s+)?(?:inaccurate|incomplete|incorrect|wrong|confusing|misleading|unclear|outdated)\b/i,
-  /\bdocumentation\s+does(?:\s+not|n['']?t)\s+(?:mention|explain|describe|cover|say)\b/i,
-];
-
-// Language indicating a runtime/deployment bug (not a schema/type issue).
-const BUG_REGEXES = [
-  /\b(?:deployment|deploy|provisioning)\s+(?:fail|fails|failed|failing)\b/i,
-  /\bfail(?:s|ed|ing)?\s+to\s+(?:deploy|provision|create|update)\b/i,
-  /\bARM\s+(?:rejects?|errors?\s+on|throws|complains)\b/i,
-  /\b(?:error\s+message|error)\s+is\s+(?:unclear|confusing|unhelpful|misleading|cryptic)\b/i,
-  /\bconfusing\s+(?:error|message)\b/i,
-  /\b(?:I\s+)?(?:don['']?t|do\s+not|cannot|can['']?t)\s+understand\s+(?:this|the|that)?\s*error\b/i,
-  /\bhas\s+no\s+effect\s+on\s+(?:deployment|the\s+resource|the\s+deploy)\b/i,
-  /\bsetting\s+\S+\s+is\s+ignored\b/i,
-  /\bdoes(?:\s+not|n['']?t)\s+(?:change|affect|modify)\s+anything\b/i,
-  /\bunexpected(?:ly)?\s+(?:fails|behavior|behaviour)\b/i,
-  /\b(?:bug|defect)\s+in\s+(?:the\s+)?(?:resource\s+provider|RP|API|service)\b/i,
-  /\bintermittent(?:ly)?\s+(?:fail|fails|failing|breaks|errors)\b/i,
-];
-
 // Subset of BUG signals unambiguous enough to OVERRIDE: the real problem is a
 // Bicep/ARM language limitation (usually wanting to loop over an array), not a
 // schema defect, so the schema-shaped categories are suppressed.
@@ -510,31 +446,6 @@ const DEFINITIVELY_BUG_REGEXES = [
   // Design/language limitation phrasing
   /\b(?:doesn['']?t|does\s+not|won['']?t|will\s+not)\s+scale\s+(?:well|nicely)?\b/i,
   /\bnot\s+scalable\b/i,
-];
-
-// A property is marked with the wrong read-only/write-only mutability. Kept
-// high-precision: only phrasings asserting a mistake, not casual mentions.
-const READWRITE_ONLY_REGEXES = [
-  /\b(?:marked|flagged|set|treated|exposed|defined)\s+(?:as\s+)?(?:read-?only|write-?only)\b/i,
-  /\bshould\s+(?:be\s+)?(?:marked\s+(?:as\s+)?)?(?:read-?only|write-?only|writable|writeable|mutable|settable)\b/i,
-  /\b(?:incorrectly|wrongly|inaccurately|erroneously|mistakenly)\s+(?:marked\s+(?:as\s+)?)?(?:read-?only|write-?only)\b/i,
-  /\b(?:read-?only|write-?only)\s+but\s+(?:should|can|it|is|shouldn|it['']?s)\b/i,
-];
-
-// Idempotency problems: re-deploying changes/recreates resources. The word
-// itself is a high-precision signal for the concept.
-const IDEMPOTENCY_REGEXES = [
-  /\bidempoten\w*/i,
-];
-
-// Deployment-time problems where the type itself is fine: fails to deploy,
-// confusing deployment error, or a property with no effect at deploy time.
-const DEPLOYMENT_REGEXES = [
-  /\b(?:resource\s+)?fail(?:s|ed|ing)?\s+to\s+deploy\b/i,
-  /\bdeployment\s+(?:fail|fails|failed|failing)\b/i,
-  /\bconfusing\s+error\s+(?:message\s+)?(?:on|during|at)\s+deployment\b/i,
-  /\b(?:no|not|without)\s+(?:having\s+)?(?:the\s+)?expected\s+effect\s+on\s+deployment\b/i,
-  /\bdo(?:es)?\s+not\s+have\s+(?:the\s+)?expected\s+effect\s+on\s+deployment\b/i,
 ];
 
 // ============================================================================
@@ -563,7 +474,13 @@ const ISSUE_CATEGORIES = [
     label: 'read-only/write-only',
     flag: 'hasReadWriteOnlyLanguage',
     templatePatterns: [/read-?only|write-?only/],
-    prosePatterns: READWRITE_ONLY_REGEXES,
+    // High-precision: only phrasings asserting a mistake, not casual mentions.
+    prosePatterns: [
+      /\b(?:marked|flagged|set|treated|exposed|defined)\s+(?:as\s+)?(?:read-?only|write-?only)\b/i,
+      /\bshould\s+(?:be\s+)?(?:marked\s+(?:as\s+)?)?(?:read-?only|write-?only|writable|writeable|mutable|settable)\b/i,
+      /\b(?:incorrectly|wrongly|inaccurately|erroneously|mistakenly)\s+(?:marked\s+(?:as\s+)?)?(?:read-?only|write-?only)\b/i,
+      /\b(?:read-?only|write-?only)\s+but\s+(?:should|can|it|is|shouldn|it['']?s)\b/i,
+    ],
     proseScope: 'proseAndTitle',
   },
   {
@@ -573,7 +490,26 @@ const ISSUE_CATEGORIES = [
     label: 'missing property',
     flag: 'hasTypeUnavailableLanguage',
     templatePatterns: [/\btype\s+is\s+unavailable\b/, /\btype\s+(?:not|un)available\b/],
-    prosePatterns: TYPE_UNAVAILABLE_REGEXES,
+    // "The type itself is absent / not generated yet" — distinct from
+    // type-issue, where the type exists but its schema is wrong.
+    prosePatterns: [
+      /\b(?:resource\s+)?type\s+(?:is\s+)?(?:unavailable|not\s+available|not\s+found)\b/i,
+      /\bresource\s+type\s+(?:is\s+)?missing\b/i,
+      /\btype\s+does(?:\s+not|n['']?t)\s+exist\b/i,
+      /\bno\s+such\s+resource\s+type\b/i,
+      /\bunknown\s+resource\s+type\b/i,
+      /\bBCP081\b/i,
+      // The gap must allow dots (the type name it spans is dotted); excluding
+      // only newlines keeps it anchored to a single line.
+      /\bResource\s+type\s+[^\n]{0,80}?\s+does\s+not\s+have\s+types\s+available\b/i,
+      /\b(?:type|types)\s+(?:for|of)\s+[`'"][^`'"\n]+[`'"]\s+(?:are\s+|is\s+)?(?:not\s+)?(?:yet\s+)?(?:available|defined|generated|published)\b/i,
+      /\bno\s+types\s+(?:available|defined|generated|published)\b/i,
+      /\btypes?\s+(?:not\s+)?(?:yet\s+)?(?:generated|published|defined)\b/i,
+      /\bmissing\s+(?:resource\s+)?type\s+definition\b/i,
+      // ARM runtime: "The resource type 'X' could not be found in the namespace 'Y'"
+      /\bresource\s+type\s+["'`][^"'`\n]+["'`]\s+could\s+not\s+be\s+found\s+in\s+the\s+namespace\b/i,
+      /\bcould\s+not\s+be\s+found\s+in\s+the\s+namespace\b/i,
+    ],
     suppressedBy: ['definitively-bug'],
   },
   {
@@ -595,7 +531,14 @@ const ISSUE_CATEGORIES = [
     // Listed before type-issue: both templates contain the word
     // "inaccurate", so description must get first refusal.
     templatePatterns: [/description/],
-    prosePatterns: DESCRIPTION_ISSUE_REGEXES,
+    // The description is wrong/confusing while the type itself is fine.
+    prosePatterns: [
+      /\b(?:inaccurate|incomplete|incorrect|wrong|confusing|misleading|unclear|outdated)\s+description\b/i,
+      /\bdescription\s+(?:for|of)\b[^\n]{0,80}?\bis\s+(?:inaccurate|incomplete|incorrect|wrong|confusing|misleading|unclear|outdated|missing)\b/i,
+      /\bdescription\s+(?:is\s+)?(?:inaccurate|incomplete|incorrect|wrong|confusing|misleading|unclear|outdated)\b/i,
+      /\b(?:doc|docs|documentation)\s+(?:for|of|on)\b[^\n]{0,80}?\b(?:is\s+)?(?:inaccurate|incomplete|incorrect|wrong|confusing|misleading|unclear|outdated)\b/i,
+      /\bdocumentation\s+does(?:\s+not|n['']?t)\s+(?:mention|explain|describe|cover|say)\b/i,
+    ],
     proseNeedsNoTemplate: true,
     suppressedBy: ['definitively-bug'],
   },
@@ -607,7 +550,19 @@ const ISSUE_CATEGORIES = [
       /\btype\s+(?:is\s+)?(?:incorrect|wrong|inaccurate)\b/,
       /\binaccurate\s+propert(?:y|ies)?\s+type/,
     ],
-    prosePatterns: TYPE_ISSUE_REGEXES,
+    // "The type exists but its schema is wrong."
+    prosePatterns: [
+      /\btype\s+(?:definition\s+)?is\s+(?:wrong|incorrect|inaccurate)/i,
+      /\btype\s+(?:definition\s+)?(?:for|of)\b[^\n]{0,100}?\bis\s+(?:wrong|incorrect|inaccurate)/i,
+      /\b(?:wrong|incorrect|inaccurate)\s+type\s+(?:for|on)\b/i,
+      /\b(?:doesn['']?t|does\s+not|don['']?t|do\s+not)\s+(?:accept|allow)\b/i,
+      /\bshould\s+(?:accept|allow)\b/i,
+      /\brejects?\b[^\n]{0,40}?\b(?:string|int|integer|number|bool|boolean|array|value)\b/i,
+      // Classic Bicep type-mismatch diagnostic.
+      /\bexpected\s+a?\s*value\s+of\s+type\b[^\n]{0,80}?\bprovided\s+value\s+is\s+of\s+type\b/i,
+      // Inline template value.
+      /\binaccurate\s+propert(?:y|ies)?\s+type/i,
+    ],
     proseBlockedByTemplate: ['description-issue'],
     suppressedBy: ['definitively-bug', 'definitively-missing'],
   },
@@ -616,7 +571,21 @@ const ISSUE_CATEGORIES = [
     label: 'bug',
     flag: 'hasBugLanguage',
     templatePatterns: [/^bug\b/],
-    prosePatterns: BUG_REGEXES,
+    // Runtime/deployment misbehaviour, not a schema/type defect.
+    prosePatterns: [
+      /\b(?:deployment|deploy|provisioning)\s+(?:fail|fails|failed|failing)\b/i,
+      /\bfail(?:s|ed|ing)?\s+to\s+(?:deploy|provision|create|update)\b/i,
+      /\bARM\s+(?:rejects?|errors?\s+on|throws|complains)\b/i,
+      /\b(?:error\s+message|error)\s+is\s+(?:unclear|confusing|unhelpful|misleading|cryptic)\b/i,
+      /\bconfusing\s+(?:error|message)\b/i,
+      /\b(?:I\s+)?(?:don['']?t|do\s+not|cannot|can['']?t)\s+understand\s+(?:this|the|that)?\s*error\b/i,
+      /\bhas\s+no\s+effect\s+on\s+(?:deployment|the\s+resource|the\s+deploy)\b/i,
+      /\bsetting\s+\S+\s+is\s+ignored\b/i,
+      /\bdoes(?:\s+not|n['']?t)\s+(?:change|affect|modify)\s+anything\b/i,
+      /\bunexpected(?:ly)?\s+(?:fails|behavior|behaviour)\b/i,
+      /\b(?:bug|defect)\s+in\s+(?:the\s+)?(?:resource\s+provider|RP|API|service)\b/i,
+      /\bintermittent(?:ly)?\s+(?:fail|fails|failing|breaks|errors)\b/i,
+    ],
   },
   {
     id: 'idempotency',
@@ -624,7 +593,8 @@ const ISSUE_CATEGORIES = [
     flag: 'hasIdempotencyLanguage',
     // No template bucket exists for idempotency; it is prose-only.
     templatePatterns: [],
-    prosePatterns: IDEMPOTENCY_REGEXES,
+    // The word itself is a high-precision signal for the concept.
+    prosePatterns: [/\bidempoten\w*/i],
     proseScope: 'proseAndTitle',
   },
   {
@@ -638,7 +608,14 @@ const ISSUE_CATEGORIES = [
       /error\s+message\s+on\s+deployment/,
       /expected\s+effect\s+on\s+deployment/,
     ],
-    prosePatterns: DEPLOYMENT_REGEXES,
+    // Deployment-time problems where the type itself is fine.
+    prosePatterns: [
+      /\b(?:resource\s+)?fail(?:s|ed|ing)?\s+to\s+deploy\b/i,
+      /\bdeployment\s+(?:fail|fails|failed|failing)\b/i,
+      /\bconfusing\s+error\s+(?:message\s+)?(?:on|during|at)\s+deployment\b/i,
+      /\b(?:no|not|without)\s+(?:having\s+)?(?:the\s+)?expected\s+effect\s+on\s+deployment\b/i,
+      /\bdo(?:es)?\s+not\s+have\s+(?:the\s+)?expected\s+effect\s+on\s+deployment\b/i,
+    ],
     proseScope: 'proseAndTitle',
     // A non-idempotent re-deploy is its own bucket, never the generic one.
     suppressedBy: ['idempotency'],
