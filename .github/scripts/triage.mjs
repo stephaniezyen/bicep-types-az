@@ -262,6 +262,17 @@ function extractInvertedFallback(text, excludeNames) {
   return null;
 }
 
+// --- Shared regex fragments: building blocks composed with new RegExp() below,
+// so each literal is written once instead of repeated in every pattern. ---
+const Q = '["\'`]';                       // a quote character: " ' or `
+const NAME = '([A-Za-z_][\\w.-]*)';       // captured identifier
+const IDENT = `${Q}?${NAME}${Q}?`;        // identifier, surrounding quotes optional
+const QIDENT = `${Q}\\**${NAME}\\**${Q}`; // quoted identifier, **bold** markers tolerated
+const DOESNT = "doesn['']?t|does\\s+not"; // negated-verb alternatives; kept as
+const DONT = "don['']?t|do\\s+not";       // separate halves so each call site can
+const DOES_NOT = "does(?:\\s+not|n['']?t)"; // reproduce its own alternation order
+const gap = n => `[^\\n]{0,${n}}?`;       // non-greedy same-line filler
+
 // High-confidence extraction from ARM/Bicep error messages that name BOTH the
 // property and its container type. Returns { properties, containerTypes };
 // container types are excluded from being read as property names elsewhere.
@@ -269,24 +280,17 @@ function extractErrorPatterns(text) {
   const properties = [];
   const containerTypes = [];
   const patterns = [
-    // "property 'X' is (not) allowed on (objects of) type 'Y'"
-    /(?:the\s+)?property\s+["'`]\**([A-Za-z_][\w.-]*)\**["'`]\s+is\s+(?:not\s+)?allowed\s+on\s+(?:objects?\s+of\s+)?type\s+["'`]\**([A-Za-z_][\w.-]*)\**["'`]/gi,
-    // "'X' is not a valid property of (type) 'Y'"
-    /["'`]\**([A-Za-z_][\w.-]*)\**["'`]\s+is\s+not\s+a\s+valid\s+property\s+(?:of|on)\s+(?:type\s+)?["'`]\**([A-Za-z_][\w.-]*)\**["'`]/gi,
-    // "property 'X' is not defined on (type) 'Y'"
-    /property\s+["'`]\**([A-Za-z_][\w.-]*)\**["'`]\s+is\s+not\s+(?:defined|declared|present)\s+on\s+(?:type\s+)?["'`]\**([A-Za-z_][\w.-]*)\**["'`]/gi,
-    // "unknown property 'X' on (type) 'Y'"
-    /unknown\s+property\s+["'`]\**([A-Za-z_][\w.-]*)\**["'`]\s+(?:on|for)\s+(?:type\s+)?["'`]\**([A-Za-z_][\w.-]*)\**["'`]/gi,
-    // "property 'X' not found on (type) 'Y'"
-    /property\s+["'`]\**([A-Za-z_][\w.-]*)\**["'`]\s+(?:not\s+found|does\s+not\s+exist)\s+on\s+(?:type\s+)?["'`]\**([A-Za-z_][\w.-]*)\**["'`]/gi,
-    // "`X` property of (type) `Y`" — user quoting property + its container type
-    /["'`]\**([A-Za-z_][\w.-]*)\**["'`]\s+property\s+of\s+(?:type\s+)?["'`]\**([A-Za-z_][\w.-]*)\**["'`]/gi,
-    // "property `X` of (type) `Y`" — same, alternate word order
-    /property\s+["'`]\**([A-Za-z_][\w.-]*)\**["'`]\s+of\s+(?:type\s+)?["'`]\**([A-Za-z_][\w.-]*)\**["'`]/gi,
-    // Bicep diagnostic code tied to a property ("BCP187 for `kind`") — the
-    // code makes this a high-confidence property reference.
-    /\bBCP\d+\b(?:\s+(?:warning|error))?\s+(?:for|on)\s+["'`]\**([A-Za-z_][\w.-]*)\**["'`]/gi,
-  ];
+    String.raw`(?:the\s+)?property\s+${QIDENT}\s+is\s+(?:not\s+)?allowed\s+on\s+(?:objects?\s+of\s+)?type\s+${QIDENT}`,
+    String.raw`${QIDENT}\s+is\s+not\s+a\s+valid\s+property\s+(?:of|on)\s+(?:type\s+)?${QIDENT}`,
+    String.raw`property\s+${QIDENT}\s+is\s+not\s+(?:defined|declared|present)\s+on\s+(?:type\s+)?${QIDENT}`,
+    String.raw`unknown\s+property\s+${QIDENT}\s+(?:on|for)\s+(?:type\s+)?${QIDENT}`,
+    String.raw`property\s+${QIDENT}\s+(?:not\s+found|does\s+not\s+exist)\s+on\s+(?:type\s+)?${QIDENT}`,
+    // User quoting the property next to its container type, either word order.
+    String.raw`${QIDENT}\s+property\s+of\s+(?:type\s+)?${QIDENT}`,
+    String.raw`property\s+${QIDENT}\s+of\s+(?:type\s+)?${QIDENT}`,
+    // A Bicep diagnostic code ("BCP187 for `kind`") makes this high-confidence.
+    String.raw`\bBCP\d+\b(?:\s+(?:warning|error))?\s+(?:for|on)\s+${QIDENT}`,
+  ].map(src => new RegExp(src, 'gi'));
   for (const re of patterns) {
     let m;
     while ((m = re.exec(text)) !== null) {
@@ -297,7 +301,7 @@ function extractErrorPatterns(text) {
   // Patterns where the container type is named BEFORE the property, so the
   // capture groups are reversed relative to the ones above.
   const reversedPatterns = [
-    /\btype\s+["'`]\**([A-Za-z_][\w.-]*)\**["'`]\s+does(?:\s+not|n['’]?t)\s+(?:contain|include|define|declare|have)\s+(?:the\s+|a\s+)?(?:property|member)\s+["'`]\**([A-Za-z_][\w.-]*)\**["'`]/gi,
+    new RegExp(String.raw`\btype\s+${QIDENT}\s+does(?:\s+not|n['’]?t)\s+(?:contain|include|define|declare|have)\s+(?:the\s+|a\s+)?(?:property|member)\s+${QIDENT}`, 'gi'),
   ];
   for (const re of reversedPatterns) {
     let m;
@@ -403,101 +407,36 @@ function stripCode(text) {
     .replace(/`[^`\n]+`/g, ' ');
 }
 
-// Language indicating "the type itself is unavailable / doesn't exist /
-// hasn't been generated yet". This is distinct from "the type exists but
-// its schema is wrong" (TYPE_ISSUE_REGEXES below).
-const TYPE_UNAVAILABLE_REGEXES = [
-  /\b(?:resource\s+)?type\s+(?:is\s+)?(?:unavailable|not\s+available|not\s+found)\b/i,
-  /\bresource\s+type\s+(?:is\s+)?missing\b/i,
-  /\btype\s+does(?:\s+not|n['']?t)\s+exist\b/i,
-  /\bno\s+such\s+resource\s+type\b/i,
-  /\bunknown\s+resource\s+type\b/i,
-  /\bBCP081\b/i,
-  // The gap must allow dots (the type name it spans is dotted); excluding
-  // only newlines keeps it anchored to a single line.
-  /\bResource\s+type\s+[^\n]{0,80}?\s+does\s+not\s+have\s+types\s+available\b/i,
-  /\b(?:type|types)\s+(?:for|of)\s+[`'"][^`'"\n]+[`'"]\s+(?:are\s+|is\s+)?(?:not\s+)?(?:yet\s+)?(?:available|defined|generated|published)\b/i,
-  /\bno\s+types\s+(?:available|defined|generated|published)\b/i,
-  /\btypes?\s+(?:not\s+)?(?:yet\s+)?(?:generated|published|defined)\b/i,
-  /\bmissing\s+(?:resource\s+)?type\s+definition\b/i,
-  // ARM runtime: "The resource type 'X' could not be found in the namespace 'Y'"
-  /\bresource\s+type\s+["'`][^"'`\n]+["'`]\s+could\s+not\s+be\s+found\s+in\s+the\s+namespace\b/i,
-  /\bcould\s+not\s+be\s+found\s+in\s+the\s+namespace\b/i,
-];
+// Bicep linter diagnostic: `The property "X" does not exist in the resource or
+// type definition` (and its older variants). Also used verbatim as the
+// definitively-missing override below.
+const PROP_NOT_IN_DEFINITION = new RegExp(
+  String.raw`\bproperty\s+${Q}${NAME}${Q}\s+does\s+not\s+exist\s+in\s+the\s+(?:resource\s+(?:or\s+type\s+)?|type\s+)?definition\b`, 'i');
 
 // Explicit "property is missing" phrases — a HIGH-CONFIDENCE missing-property
 // signal, unlike the loose proximity heuristic (MISS_NEAR_PROP).
 const EXPLICIT_MISSING_PROP_REGEXES = [
-  // "<X> property is missing" / "<X> property missing" / "<X> properties missing"
-  /\b([A-Za-z_][\w.-]*)\s+propert(?:y|ies)\s+(?:is\s+|are\s+)?missing\b/i,
-  // "property <X> is missing"
-  /\bproperty\s+["'`]?([A-Za-z_][\w.-]*)["'`]?\s+is\s+missing\b/i,
+  // "<X> property is missing" / "<X> properties missing"
+  new RegExp(String.raw`\b${NAME}\s+propert(?:y|ies)\s+(?:is\s+|are\s+)?missing\b`, 'i'),
+  new RegExp(String.raw`\bproperty\s+${IDENT}\s+is\s+missing\b`, 'i'),
   // "missing property <X>" / "Missing property(s): <X>"
-  /\bmissing\s+propert(?:y|ies)(?:\s*\(s\))?[\s:]+["'`]?([A-Za-z_][\w.-]*)["'`]?/i,
-  // "is missing the <X> property"
-  /\bis\s+missing\s+(?:the\s+)?["'`]?([A-Za-z_][\w.-]*)["'`]?\s+property\b/i,
-  // Inverted: "does not expose <X> property", "doesn't have <X> property",
-  // "type does not have a <X> property", "does not include <X>"
-  /\b(?:doesn['']?t|does\s+not|do\s+not|don['']?t)\s+(?:expose|include|have|contain|define|support)\s+(?:an?\s+|the\s+)?["'`]?([A-Za-z_][\w.-]*)["'`]?\s+propert/i,
+  new RegExp(String.raw`\bmissing\s+propert(?:y|ies)(?:\s*\(s\))?[\s:]+${IDENT}`, 'i'),
+  new RegExp(String.raw`\bis\s+missing\s+(?:the\s+)?${IDENT}\s+property\b`, 'i'),
+  // Inverted: "does not expose / doesn't have / does not include <X> property"
+  new RegExp(String.raw`\b(?:${DOESNT}|do\s+not|don['']?t)\s+(?:expose|include|have|contain|define|support)\s+(?:an?\s+|the\s+)?${IDENT}\s+propert`, 'i'),
   // "type definition does not expose (a|the) <X>"
-  /\btype\s+(?:definition\s+)?(?:doesn['']?t|does\s+not)\s+(?:expose|include|have|contain|define)\s+(?:an?\s+|the\s+)?["'`]?([A-Za-z_][\w.-]*)["'`]?\b/i,
+  new RegExp(String.raw`\btype\s+(?:definition\s+)?(?:${DOESNT})\s+(?:expose|include|have|contain|define)\s+(?:an?\s+|the\s+)?${IDENT}\b`, 'i'),
   // "lacks (a|the) <X> property" / "lacking <X>"
-  /\black(?:s|ing)?\s+(?:an?\s+|the\s+)?["'`]?([A-Za-z_][\w.-]*)["'`]?\s+propert/i,
+  new RegExp(String.raw`\black(?:s|ing)?\s+(?:an?\s+|the\s+)?${IDENT}\s+propert`, 'i'),
   // "no <X> property"
-  /\bno\s+["'`]?([A-Za-z_][\w.-]*)["'`]?\s+propert(?:y|ies)\b/i,
-  // Bicep linter diagnostic: `The property "X" does not exist in the
-  // resource or type definition` (and its older variants).
-  /\bproperty\s+["'`]([A-Za-z_][\w.-]*)["'`]\s+does\s+not\s+exist\s+in\s+the\s+(?:resource\s+(?:or\s+type\s+)?|type\s+)?definition\b/i,
+  new RegExp(String.raw`\bno\s+${IDENT}\s+propert(?:y|ies)\b`, 'i'),
+  PROP_NOT_IN_DEFINITION,
 ];
 
 // Subset of EXPLICIT_MISSING_PROP_REGEXES unambiguous enough to OVERRIDE the
 // reporter's template selection: literal Bicep/ARM errors saying the property
 // is not defined, not that it has the wrong type.
-const DEFINITIVELY_MISSING_REGEXES = [
-  /\bproperty\s+["'`]([A-Za-z_][\w.-]*)["'`]\s+does\s+not\s+exist\s+in\s+the\s+(?:resource\s+(?:or\s+type\s+)?|type\s+)?definition\b/i,
-];
-
-// Language indicating "the type exists but its schema is wrong".
-// Intentionally separate from missing-property + types-unavailable.
-const TYPE_ISSUE_REGEXES = [
-  /\btype\s+(?:definition\s+)?is\s+(?:wrong|incorrect|inaccurate)/i,
-  /\btype\s+(?:definition\s+)?(?:for|of)\b[^\n]{0,100}?\bis\s+(?:wrong|incorrect|inaccurate)/i,
-  /\b(?:wrong|incorrect|inaccurate)\s+type\s+(?:for|on)\b/i,
-  /\b(?:doesn['']?t|does\s+not|don['']?t|do\s+not)\s+(?:accept|allow)\b/i,
-  /\bshould\s+(?:accept|allow)\b/i,
-  /\brejects?\b[^\n]{0,40}?\b(?:string|int|integer|number|bool|boolean|array|value)\b/i,
-  // Classic Bicep type-mismatch diagnostic.
-  /\bexpected\s+a?\s*value\s+of\s+type\b[^\n]{0,80}?\bprovided\s+value\s+is\s+of\s+type\b/i,
-  // Inline template value.
-  /\binaccurate\s+propert(?:y|ies)?\s+type/i,
-];
-
-// A property's DESCRIPTION is wrong or confusing while the type itself is
-// fine — the template's "Inaccurate/confusing description(s)" bucket. Kept
-// separate from type-issue so it gets its own label.
-const DESCRIPTION_ISSUE_REGEXES = [
-  /\b(?:inaccurate|incomplete|incorrect|wrong|confusing|misleading|unclear|outdated)\s+description\b/i,
-  /\bdescription\s+(?:for|of)\b[^\n]{0,80}?\bis\s+(?:inaccurate|incomplete|incorrect|wrong|confusing|misleading|unclear|outdated|missing)\b/i,
-  /\bdescription\s+(?:is\s+)?(?:inaccurate|incomplete|incorrect|wrong|confusing|misleading|unclear|outdated)\b/i,
-  /\b(?:doc|docs|documentation)\s+(?:for|of|on)\b[^\n]{0,80}?\b(?:is\s+)?(?:inaccurate|incomplete|incorrect|wrong|confusing|misleading|unclear|outdated)\b/i,
-  /\bdocumentation\s+does(?:\s+not|n['']?t)\s+(?:mention|explain|describe|cover|say)\b/i,
-];
-
-// Language indicating a runtime/deployment bug (not a schema/type issue).
-const BUG_REGEXES = [
-  /\b(?:deployment|deploy|provisioning)\s+(?:fail|fails|failed|failing)\b/i,
-  /\bfail(?:s|ed|ing)?\s+to\s+(?:deploy|provision|create|update)\b/i,
-  /\bARM\s+(?:rejects?|errors?\s+on|throws|complains)\b/i,
-  /\b(?:error\s+message|error)\s+is\s+(?:unclear|confusing|unhelpful|misleading|cryptic)\b/i,
-  /\bconfusing\s+(?:error|message)\b/i,
-  /\b(?:I\s+)?(?:don['']?t|do\s+not|cannot|can['']?t)\s+understand\s+(?:this|the|that)?\s*error\b/i,
-  /\bhas\s+no\s+effect\s+on\s+(?:deployment|the\s+resource|the\s+deploy)\b/i,
-  /\bsetting\s+\S+\s+is\s+ignored\b/i,
-  /\bdoes(?:\s+not|n['']?t)\s+(?:change|affect|modify)\s+anything\b/i,
-  /\bunexpected(?:ly)?\s+(?:fails|behavior|behaviour)\b/i,
-  /\b(?:bug|defect)\s+in\s+(?:the\s+)?(?:resource\s+provider|RP|API|service)\b/i,
-  /\bintermittent(?:ly)?\s+(?:fail|fails|failing|breaks|errors)\b/i,
-];
+const DEFINITIVELY_MISSING_REGEXES = [PROP_NOT_IN_DEFINITION];
 
 // Subset of BUG signals unambiguous enough to OVERRIDE: the real problem is a
 // Bicep/ARM language limitation (usually wanting to loop over an array), not a
@@ -508,33 +447,8 @@ const DEFINITIVELY_BUG_REGEXES = [
   // Bicep `for-expression` used as a noun
   /\bfor[-\s]expression\b/i,
   // Design/language limitation phrasing
-  /\b(?:doesn['']?t|does\s+not|won['']?t|will\s+not)\s+scale\s+(?:well|nicely)?\b/i,
+  new RegExp(String.raw`\b(?:${DOESNT}|won['']?t|will\s+not)\s+scale\s+(?:well|nicely)?\b`, 'i'),
   /\bnot\s+scalable\b/i,
-];
-
-// A property is marked with the wrong read-only/write-only mutability. Kept
-// high-precision: only phrasings asserting a mistake, not casual mentions.
-const READWRITE_ONLY_REGEXES = [
-  /\b(?:marked|flagged|set|treated|exposed|defined)\s+(?:as\s+)?(?:read-?only|write-?only)\b/i,
-  /\bshould\s+(?:be\s+)?(?:marked\s+(?:as\s+)?)?(?:read-?only|write-?only|writable|writeable|mutable|settable)\b/i,
-  /\b(?:incorrectly|wrongly|inaccurately|erroneously|mistakenly)\s+(?:marked\s+(?:as\s+)?)?(?:read-?only|write-?only)\b/i,
-  /\b(?:read-?only|write-?only)\s+but\s+(?:should|can|it|is|shouldn|it['']?s)\b/i,
-];
-
-// Idempotency problems: re-deploying changes/recreates resources. The word
-// itself is a high-precision signal for the concept.
-const IDEMPOTENCY_REGEXES = [
-  /\bidempoten\w*/i,
-];
-
-// Deployment-time problems where the type itself is fine: fails to deploy,
-// confusing deployment error, or a property with no effect at deploy time.
-const DEPLOYMENT_REGEXES = [
-  /\b(?:resource\s+)?fail(?:s|ed|ing)?\s+to\s+deploy\b/i,
-  /\bdeployment\s+(?:fail|fails|failed|failing)\b/i,
-  /\bconfusing\s+error\s+(?:message\s+)?(?:on|during|at)\s+deployment\b/i,
-  /\b(?:no|not|without)\s+(?:having\s+)?(?:the\s+)?expected\s+effect\s+on\s+deployment\b/i,
-  /\bdo(?:es)?\s+not\s+have\s+(?:the\s+)?expected\s+effect\s+on\s+deployment\b/i,
 ];
 
 // ============================================================================
@@ -563,7 +477,13 @@ const ISSUE_CATEGORIES = [
     label: 'read-only/write-only',
     flag: 'hasReadWriteOnlyLanguage',
     templatePatterns: [/read-?only|write-?only/],
-    prosePatterns: READWRITE_ONLY_REGEXES,
+    // High-precision: only phrasings asserting a mistake, not casual mentions.
+    prosePatterns: [
+      /\b(?:marked|flagged|set|treated|exposed|defined)\s+(?:as\s+)?(?:read-?only|write-?only)\b/i,
+      /\bshould\s+(?:be\s+)?(?:marked\s+(?:as\s+)?)?(?:read-?only|write-?only|writable|writeable|mutable|settable)\b/i,
+      /\b(?:incorrectly|wrongly|inaccurately|erroneously|mistakenly)\s+(?:marked\s+(?:as\s+)?)?(?:read-?only|write-?only)\b/i,
+      /\b(?:read-?only|write-?only)\s+but\s+(?:should|can|it|is|shouldn|it['']?s)\b/i,
+    ],
     proseScope: 'proseAndTitle',
   },
   {
@@ -573,7 +493,26 @@ const ISSUE_CATEGORIES = [
     label: 'missing property',
     flag: 'hasTypeUnavailableLanguage',
     templatePatterns: [/\btype\s+is\s+unavailable\b/, /\btype\s+(?:not|un)available\b/],
-    prosePatterns: TYPE_UNAVAILABLE_REGEXES,
+    // "The type itself is absent / not generated yet" — distinct from
+    // type-issue, where the type exists but its schema is wrong.
+    prosePatterns: [
+      /\b(?:resource\s+)?type\s+(?:is\s+)?(?:unavailable|not\s+available|not\s+found)\b/i,
+      /\bresource\s+type\s+(?:is\s+)?missing\b/i,
+      new RegExp(String.raw`\btype\s+${DOES_NOT}\s+exist\b`, 'i'),
+      /\bno\s+such\s+resource\s+type\b/i,
+      /\bunknown\s+resource\s+type\b/i,
+      /\bBCP081\b/i,
+      // The gap must allow dots (the type name it spans is dotted); excluding
+      // only newlines keeps it anchored to a single line.
+      new RegExp(String.raw`\bResource\s+type\s+${gap(80)}\s+does\s+not\s+have\s+types\s+available\b`, 'i'),
+      /\b(?:type|types)\s+(?:for|of)\s+[`'"][^`'"\n]+[`'"]\s+(?:are\s+|is\s+)?(?:not\s+)?(?:yet\s+)?(?:available|defined|generated|published)\b/i,
+      /\bno\s+types\s+(?:available|defined|generated|published)\b/i,
+      /\btypes?\s+(?:not\s+)?(?:yet\s+)?(?:generated|published|defined)\b/i,
+      /\bmissing\s+(?:resource\s+)?type\s+definition\b/i,
+      // ARM runtime: "The resource type 'X' could not be found in the namespace 'Y'"
+      /\bresource\s+type\s+["'`][^"'`\n]+["'`]\s+could\s+not\s+be\s+found\s+in\s+the\s+namespace\b/i,
+      /\bcould\s+not\s+be\s+found\s+in\s+the\s+namespace\b/i,
+    ],
     suppressedBy: ['definitively-bug'],
   },
   {
@@ -595,7 +534,14 @@ const ISSUE_CATEGORIES = [
     // Listed before type-issue: both templates contain the word
     // "inaccurate", so description must get first refusal.
     templatePatterns: [/description/],
-    prosePatterns: DESCRIPTION_ISSUE_REGEXES,
+    // The description is wrong/confusing while the type itself is fine.
+    prosePatterns: [
+      /\b(?:inaccurate|incomplete|incorrect|wrong|confusing|misleading|unclear|outdated)\s+description\b/i,
+      new RegExp(String.raw`\bdescription\s+(?:for|of)\b${gap(80)}\bis\s+(?:inaccurate|incomplete|incorrect|wrong|confusing|misleading|unclear|outdated|missing)\b`, 'i'),
+      /\bdescription\s+(?:is\s+)?(?:inaccurate|incomplete|incorrect|wrong|confusing|misleading|unclear|outdated)\b/i,
+      new RegExp(String.raw`\b(?:doc|docs|documentation)\s+(?:for|of|on)\b${gap(80)}\b(?:is\s+)?(?:inaccurate|incomplete|incorrect|wrong|confusing|misleading|unclear|outdated)\b`, 'i'),
+      new RegExp(String.raw`\bdocumentation\s+${DOES_NOT}\s+(?:mention|explain|describe|cover|say)\b`, 'i'),
+    ],
     proseNeedsNoTemplate: true,
     suppressedBy: ['definitively-bug'],
   },
@@ -607,7 +553,19 @@ const ISSUE_CATEGORIES = [
       /\btype\s+(?:is\s+)?(?:incorrect|wrong|inaccurate)\b/,
       /\binaccurate\s+propert(?:y|ies)?\s+type/,
     ],
-    prosePatterns: TYPE_ISSUE_REGEXES,
+    // "The type exists but its schema is wrong."
+    prosePatterns: [
+      /\btype\s+(?:definition\s+)?is\s+(?:wrong|incorrect|inaccurate)/i,
+      new RegExp(String.raw`\btype\s+(?:definition\s+)?(?:for|of)\b${gap(100)}\bis\s+(?:wrong|incorrect|inaccurate)`, 'i'),
+      /\b(?:wrong|incorrect|inaccurate)\s+type\s+(?:for|on)\b/i,
+      new RegExp(String.raw`\b(?:${DOESNT}|${DONT})\s+(?:accept|allow)\b`, 'i'),
+      /\bshould\s+(?:accept|allow)\b/i,
+      new RegExp(String.raw`\brejects?\b${gap(40)}\b(?:string|int|integer|number|bool|boolean|array|value)\b`, 'i'),
+      // Classic Bicep type-mismatch diagnostic.
+      new RegExp(String.raw`\bexpected\s+a?\s*value\s+of\s+type\b${gap(80)}\bprovided\s+value\s+is\s+of\s+type\b`, 'i'),
+      // Inline template value.
+      /\binaccurate\s+propert(?:y|ies)?\s+type/i,
+    ],
     proseBlockedByTemplate: ['description-issue'],
     suppressedBy: ['definitively-bug', 'definitively-missing'],
   },
@@ -616,7 +574,21 @@ const ISSUE_CATEGORIES = [
     label: 'bug',
     flag: 'hasBugLanguage',
     templatePatterns: [/^bug\b/],
-    prosePatterns: BUG_REGEXES,
+    // Runtime/deployment misbehaviour, not a schema/type defect.
+    prosePatterns: [
+      /\b(?:deployment|deploy|provisioning)\s+(?:fail|fails|failed|failing)\b/i,
+      /\bfail(?:s|ed|ing)?\s+to\s+(?:deploy|provision|create|update)\b/i,
+      /\bARM\s+(?:rejects?|errors?\s+on|throws|complains)\b/i,
+      /\b(?:error\s+message|error)\s+is\s+(?:unclear|confusing|unhelpful|misleading|cryptic)\b/i,
+      /\bconfusing\s+(?:error|message)\b/i,
+      new RegExp(String.raw`\b(?:I\s+)?(?:${DONT}|cannot|can['']?t)\s+understand\s+(?:this|the|that)?\s*error\b`, 'i'),
+      /\bhas\s+no\s+effect\s+on\s+(?:deployment|the\s+resource|the\s+deploy)\b/i,
+      /\bsetting\s+\S+\s+is\s+ignored\b/i,
+      new RegExp(String.raw`\b${DOES_NOT}\s+(?:change|affect|modify)\s+anything\b`, 'i'),
+      /\bunexpected(?:ly)?\s+(?:fails|behavior|behaviour)\b/i,
+      /\b(?:bug|defect)\s+in\s+(?:the\s+)?(?:resource\s+provider|RP|API|service)\b/i,
+      /\bintermittent(?:ly)?\s+(?:fail|fails|failing|breaks|errors)\b/i,
+    ],
   },
   {
     id: 'idempotency',
@@ -624,7 +596,8 @@ const ISSUE_CATEGORIES = [
     flag: 'hasIdempotencyLanguage',
     // No template bucket exists for idempotency; it is prose-only.
     templatePatterns: [],
-    prosePatterns: IDEMPOTENCY_REGEXES,
+    // The word itself is a high-precision signal for the concept.
+    prosePatterns: [/\bidempoten\w*/i],
     proseScope: 'proseAndTitle',
   },
   {
@@ -638,7 +611,14 @@ const ISSUE_CATEGORIES = [
       /error\s+message\s+on\s+deployment/,
       /expected\s+effect\s+on\s+deployment/,
     ],
-    prosePatterns: DEPLOYMENT_REGEXES,
+    // Deployment-time problems where the type itself is fine.
+    prosePatterns: [
+      /\b(?:resource\s+)?fail(?:s|ed|ing)?\s+to\s+deploy\b/i,
+      /\bdeployment\s+(?:fail|fails|failed|failing)\b/i,
+      /\bconfusing\s+error\s+(?:message\s+)?(?:on|during|at)\s+deployment\b/i,
+      /\b(?:no|not|without)\s+(?:having\s+)?(?:the\s+)?expected\s+effect\s+on\s+deployment\b/i,
+      /\bdo(?:es)?\s+not\s+have\s+(?:the\s+)?expected\s+effect\s+on\s+deployment\b/i,
+    ],
     proseScope: 'proseAndTitle',
     // A non-idempotent re-deploy is its own bucket, never the generic one.
     suppressedBy: ['idempotency'],
@@ -652,8 +632,8 @@ const MANAGED_LABELS = [
   ...new Set(ISSUE_CATEGORIES.map(c => c.label)),
   'property found',
   'available in newer version',
-  // Deprecated: folded into `missing property`. Never applied, always
-  // removed, so old issues get cleaned up as they are re-triaged.
+  // Deprecated (folded into `missing property`): never applied, but kept here
+  // so re-triage strips it from issues labeled before the fold.
   'types unavailable',
 ];
 
@@ -1638,9 +1618,6 @@ if (duplicateMatches.length > 0) {
     `Labeled \`possible-duplicate\` for maintainer review — not auto-closing.`
   );
 }
-
-// (Clarification-request comment removed — too noisy; it fired whenever the
-// classifier couldn't extract a property name, even on clear issues.)
 
 // Only acknowledge on the FIRST triage; skip on retriggers.
 if (commentBlocks.length === 0 && action === 'opened' && !priorBotComment) {
