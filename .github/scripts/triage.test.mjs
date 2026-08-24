@@ -4,6 +4,8 @@ import assert from 'node:assert/strict';
 import {
   run,
   classify,
+  ISSUE_CATEGORIES,
+  MANAGED_LABELS,
   extractAllMissingProperties,
   canonicalizeProperties,
   isPlausiblePropertyName,
@@ -288,4 +290,50 @@ test('classifies the template "Property(s) do not have expected effect on deploy
   const cls = classify(body, { title: 'x', body });
   assert.equal(cls.templateIssueType, 'deployment');
   assert.equal(cls.hasDeploymentLanguage, true);
+});
+
+// --- ISSUE_CATEGORIES config-table integrity ---
+// These guard the invariants the generic classify/label loops rely on, so a
+// malformed new category fails fast in CI instead of silently misbehaving.
+
+test('every category has a unique id and flag', () => {
+  const ids = ISSUE_CATEGORIES.map(c => c.id);
+  const flags = ISSUE_CATEGORIES.map(c => c.flag);
+  assert.equal(new Set(ids).size, ids.length, 'duplicate category id');
+  assert.equal(new Set(flags).size, flags.length, 'duplicate category flag');
+});
+
+test('every category label is managed so it can be stripped when stale', () => {
+  for (const c of ISSUE_CATEGORIES) {
+    assert.ok(MANAGED_LABELS.includes(c.label),
+      `${c.id} applies "${c.label}" but it is not in MANAGED_LABELS`);
+  }
+});
+
+test('MANAGED_LABELS never strips resource-provider labels', () => {
+  for (const label of MANAGED_LABELS) {
+    assert.ok(!/^Microsoft\./.test(label),
+      `RP label "${label}" must not be auto-removed`);
+  }
+});
+
+test('suppressedBy only references categories decided earlier in the table', () => {
+  // The classify() loop evaluates categories in order and reads already-computed
+  // flags, so a suppressor must appear before the category it suppresses.
+  const decided = new Set(['definitively-bug', 'definitively-missing']);
+  for (const c of ISSUE_CATEGORIES) {
+    for (const dep of c.suppressedBy || []) {
+      assert.ok(decided.has(dep),
+        `${c.id} is suppressed by "${dep}", which is not decided before it`);
+    }
+    decided.add(c.id);
+  }
+});
+
+test('classify returns exactly one flag per category', () => {
+  const cls = classify('Microsoft.Storage/storageAccounts is missing accessTier', '');
+  for (const c of ISSUE_CATEGORIES) {
+    assert.equal(typeof cls[c.flag], 'boolean',
+      `classify() did not return a boolean for ${c.flag}`);
+  }
 });
