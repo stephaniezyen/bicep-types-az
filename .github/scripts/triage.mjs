@@ -1606,42 +1606,6 @@ if (duplicateMatches.length > 0) {
   );
 }
 
-// Only acknowledge on the FIRST triage; skip on retriggers.
-if (commentBlocks.length === 0 && action === 'opened' && !priorBotComment) {
-  const lines = ['Thanks for the report! Auto-triage detected:', ''];
-  if (primaryRps.length > 0) {
-    lines.push(`- **Resource provider${primaryRps.length > 1 ? 's' : ''}:** ` +
-      primaryRps.map(r => `\`${r}\``).join(', '));
-  }
-  // Only include the type for missing-property or type-issue — elsewhere the
-  // type isn't the interesting signal.
-  if (cls.hasMissingPropertyLanguage || cls.hasTypeIssueLanguage) {
-    const primaryTypes = (titleNonWrapperTypes.length > 0
-      ? titleNonWrapperTypes
-      : (bodyNonWrapperTypes.length > 0 ? bodyNonWrapperTypes : cls.types));
-    if (primaryTypes.length > 0) {
-      lines.push(`- **Type${primaryTypes.length > 1 ? 's' : ''}:** ` +
-        primaryTypes.map(t => `\`${t}\``).join(', '));
-    }
-    if (cls.apiVersion) {
-      lines.push(`- **API version:** \`${cls.apiVersion}\``);
-    }
-  }
-  if (cls.hasTypeIssueLanguage) {
-    lines.push(`- Labeled \`type issue\` based on language about the type being wrong or unavailable.`);
-  }
-  if (cls.hasBugLanguage) {
-    lines.push(`- Labeled \`bug\` based on language about a deployment failure or unexpected runtime behavior.`);
-  }
-  if (cls.hasMissingPropertyLanguage) {
-    lines.push(`- Labeled \`missing property\`` +
-      (cls.propertyName ? ` (extracted property: \`${cls.propertyName}\`)` : '') + `.`);
-  }
-  if (lines.length > 2) {
-    commentBlocks.push(lines.join('\n'));
-  }
-}
-
 if (commentBlocks.length > 0) {
   const body = `${MARKER}\n` + commentBlocks.join('\n\n---\n\n');
   if (priorBotComment) {
