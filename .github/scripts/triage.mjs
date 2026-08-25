@@ -46,6 +46,9 @@ const PROP_TERMS = ['property', 'properties', 'field', 'fields', 'attribute', 'a
 
 // Build an alternation regex (escape spaces; '.' isn't used in any term).
 const escapeRe = s => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+// Same, but also escapes '/' - for embedding a `Microsoft.X/y` resource type
+// in a regex.
+const escapeTypeRe = s => s.replace(/[.*+?^${}()|[\]\\/]/g, '\\$&');
 const missAlt = MISS_TERMS.map(escapeRe).join('|');
 const propAlt = PROP_TERMS.join('|');
 
@@ -826,7 +829,7 @@ function classify(text, opts) {
 // Case-insensitive whole-word search.
 function pageHasWord(pageText, word) {
   if (!pageText || !word) return false;
-  const esc = word.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  const esc = escapeRe(word);
   return new RegExp(`(?<![A-Za-z0-9_])${esc}(?![A-Za-z0-9_])`, 'i').test(pageText);
 }
 
@@ -998,7 +1001,7 @@ async function fetchDocsText(type, preferVersion) {
   const namespace = parts[0].toLowerCase();
   const slug = namespace.replace(/^microsoft\./, '');
   const generated = await listGenerated();
-  const slugRe = new RegExp(`^${slug.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}(_\\d+)?$`);
+  const slugRe = new RegExp(`^${escapeRe(slug)}(_\\d+)?$`);
   const candidates = generated.filter(n => slugRe.test(n));
   if (!candidates.length) {
     return { url: null, status: 404, text: null };
@@ -1026,7 +1029,7 @@ async function fetchDocsText(type, preferVersion) {
       all.unshift(pinned);
     }
   }
-  const escType = type.replace(/[.*+?^${}()|[\]\\/]/g, '\\$&');
+  const escType = escapeTypeRe(type);
   const markerRe = new RegExp(`^## Resource ${escType}@`, 'im');
   // Walk candidates newest-first in small parallel batches, so a type that
   // doesn't exist costs ceil(N/BATCH) round trips instead of N. Sort order is
@@ -1063,7 +1066,7 @@ async function findPropertyInNewerVersion(type, propertyNames, requestedVersion)
   const namespace = parts[0].toLowerCase();
   const slug = namespace.replace(/^microsoft\./, '');
   const generated = await listGenerated();
-  const slugRe = new RegExp(`^${slug.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}(_\\d+)?$`);
+  const slugRe = new RegExp(`^${escapeRe(slug)}(_\\d+)?$`);
   const candidates = generated.filter(n => slugRe.test(n));
   if (!candidates.length) return null;
   const all = [];
@@ -1076,7 +1079,7 @@ async function findPropertyInNewerVersion(type, propertyNames, requestedVersion)
   }
   if (!all.length) return null;
   all.sort((a, b) => compareTypeVersions(a.v, b.v)); // newest first
-  const escType = type.replace(/[.*+?^${}()|[\]\\/]/g, '\\$&');
+  const escType = escapeTypeRe(type);
   const markerRe = new RegExp(`^## Resource ${escType}@`, 'im');
   const BATCH = 6;
   for (let i = 0; i < all.length; i += BATCH) {
