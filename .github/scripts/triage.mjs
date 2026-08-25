@@ -990,22 +990,21 @@ async function fetchTypesMd(folder, ns, version) {
   }
 }
 
-// Resolve a Microsoft.X/y resource type to the types.md that declares it,
-// preferring preferVersion (the version the user is on) and falling back to
-// the latest. Returns { url, status, text, version }.
-async function fetchDocsText(type, preferVersion) {
+const typesMdBlobUrl = cand =>
+  `https://github.com/${TYPES_REPO}/blob/${TYPES_BRANCH}/generated/${cand.folder}/${cand.nsDir}/${cand.v}/types.md`;
+
+// Enumerate every generated (folder, nsDir, version) triple that could declare
+// `type`, newest-first, along with the heading matcher for that type. Returns
+// null when `type` isn't a parseable Microsoft.X/y string; `all` is empty when
+// nothing under generated/ matches.
+async function enumerateTypeVersions(type) {
   const parts = type.split('/');
-  if (parts.length < 2 || !/^Microsoft\./i.test(parts[0])) {
-    return { url: null, status: null, text: null };
-  }
+  if (parts.length < 2 || !/^Microsoft\./i.test(parts[0])) return null;
   const namespace = parts[0].toLowerCase();
   const slug = namespace.replace(/^microsoft\./, '');
   const generated = await listGenerated();
   const slugRe = new RegExp(`^${escapeRe(slug)}(_\\d+)?$`);
   const candidates = generated.filter(n => slugRe.test(n));
-  if (!candidates.length) {
-    return { url: null, status: 404, text: null };
-  }
   // Collect every (folder, nsDir, version) triple across candidate folders.
   const all = [];
   for (const folder of candidates) {
@@ -1017,9 +1016,40 @@ async function fetchDocsText(type, preferVersion) {
       if (v.type === 'dir') all.push({ folder, nsDir: nsDir.name, v: v.name });
     }
   }
-  if (!all.length) return { url: null, status: 404, text: null };
   // Sort newest-first (GA ranks above a preview of the same date).
   all.sort((a, b) => compareTypeVersions(a.v, b.v));
+  return { namespace, all, markerRe: new RegExp(`^## Resource ${escapeTypeRe(type)}@`, 'im') };
+}
+
+// Fetch candidates in small parallel batches, so a type that doesn't exist
+// costs ceil(N/BATCH) round trips instead of N. Sort order is still honoured
+// within a batch. Every fetched types.md that declares the type is handed to
+// `onHit`; the first non-undefined `onHit` result wins.
+const TYPES_MD_BATCH = 6;
+async function walkTypeVersions(all, markerRe, onHit) {
+  for (let i = 0; i < all.length; i += TYPES_MD_BATCH) {
+    const batch = all.slice(i, i + TYPES_MD_BATCH);
+    const fetched = await Promise.all(
+      batch.map(cand => fetchTypesMd(cand.folder, cand.nsDir, cand.v))
+    );
+    for (let j = 0; j < batch.length; j++) {
+      const res = fetched[j];
+      if (!res.text || !markerRe.test(res.text)) continue;
+      const hit = onHit(batch[j], res);
+      if (hit !== undefined) return hit;
+    }
+  }
+  return undefined;
+}
+
+// Resolve a Microsoft.X/y resource type to the types.md that declares it,
+// preferring preferVersion (the version the user is on) and falling back to
+// the latest. Returns { url, status, text, version }.
+async function fetchDocsText(type, preferVersion) {
+  const enumerated = await enumerateTypeVersions(type);
+  if (!enumerated) return { url: null, status: null, text: null };
+  const { all, markerRe } = enumerated;
+  if (!all.length) return { url: null, status: 404, text: null };
   // Honour a pinned API version first so we verify what they're deploying.
   if (preferVersion) {
     const pv = preferVersion.toLowerCase();
@@ -1029,77 +1059,31 @@ async function fetchDocsText(type, preferVersion) {
       all.unshift(pinned);
     }
   }
-  const escType = escapeTypeRe(type);
-  const markerRe = new RegExp(`^## Resource ${escType}@`, 'im');
-  // Walk candidates newest-first in small parallel batches, so a type that
-  // doesn't exist costs ceil(N/BATCH) round trips instead of N. Sort order is
-  // still honoured within a batch.
-  const BATCH = 6;
-  for (let i = 0; i < all.length; i += BATCH) {
-    const batch = all.slice(i, i + BATCH);
-    const fetched = await Promise.all(
-      batch.map(cand => fetchTypesMd(cand.folder, cand.nsDir, cand.v))
-    );
-    for (let j = 0; j < batch.length; j++) {
-      const res = fetched[j];
-      if (!res.text || !markerRe.test(res.text)) continue;
-      const cand = batch[j];
-      return {
-        url: `https://github.com/${TYPES_REPO}/blob/${TYPES_BRANCH}/generated/${cand.folder}/${cand.nsDir}/${cand.v}/types.md`,
-        status: 200,
-        text: res.text,
-        version: cand.v,
-        requestedVersion: preferVersion || null,
-        versionMatched: preferVersion ? cand.v.toLowerCase() === preferVersion.toLowerCase() : null,
-      };
-    }
-  }
-  return { url: null, status: 404, text: null };
+  const hit = await walkTypeVersions(all, markerRe, (cand, res) => ({
+    url: typesMdBlobUrl(cand),
+    status: 200,
+    text: res.text,
+    version: cand.v,
+    requestedVersion: preferVersion || null,
+    versionMatched: preferVersion ? cand.v.toLowerCase() === preferVersion.toLowerCase() : null,
+  }));
+  return hit === undefined ? { url: null, status: 404, text: null } : hit;
 }
 
 // Find the NEWEST generated API version whose scoped schema contains ALL the
 // named properties, turning a dead-end `missing property` into an actionable
 // "available in <newer version>" hint. Returns { version, url } or null.
 async function findPropertyInNewerVersion(type, propertyNames, requestedVersion) {
-  const parts = type.split('/');
-  if (parts.length < 2 || !/^Microsoft\./i.test(parts[0])) return null;
-  const namespace = parts[0].toLowerCase();
-  const slug = namespace.replace(/^microsoft\./, '');
-  const generated = await listGenerated();
-  const slugRe = new RegExp(`^${escapeRe(slug)}(_\\d+)?$`);
-  const candidates = generated.filter(n => slugRe.test(n));
-  if (!candidates.length) return null;
-  const all = [];
-  for (const folder of candidates) {
-    const entries = await listContents(`generated/${folder}`);
-    const nsDir = entries.find(e => e.type === 'dir' && e.name.toLowerCase() === namespace);
-    if (!nsDir) continue;
-    const versions = await listContents(`generated/${folder}/${nsDir.name}`);
-    for (const v of versions) if (v.type === 'dir') all.push({ folder, nsDir: nsDir.name, v: v.name });
-  }
-  if (!all.length) return null;
-  all.sort((a, b) => compareTypeVersions(a.v, b.v)); // newest first
-  const escType = escapeTypeRe(type);
-  const markerRe = new RegExp(`^## Resource ${escType}@`, 'im');
-  const BATCH = 6;
-  for (let i = 0; i < all.length; i += BATCH) {
-    const batch = all.slice(i, i + BATCH);
-    const fetched = await Promise.all(batch.map(c => fetchTypesMd(c.folder, c.nsDir, c.v)));
-    for (let j = 0; j < batch.length; j++) {
-      const res = fetched[j], cand = batch[j];
-      if (!res.text || !markerRe.test(res.text)) continue;
-      // Only interested in versions strictly NEWER than the reporter's.
-      if (requestedVersion && compareTypeVersions(cand.v, requestedVersion) >= 0) continue;
-      const scoped = scopeToResourceType(res.text, type, cand.v) || res.text;
-      if (propertyNames.every(n => pageHasWord(scoped, n))) {
-        return {
-          version: cand.v,
-          url: `https://github.com/${TYPES_REPO}/blob/${TYPES_BRANCH}/generated/${cand.folder}/${cand.nsDir}/${cand.v}/types.md`,
-        };
-      }
-    }
-  }
-  return null;
+  const enumerated = await enumerateTypeVersions(type);
+  if (!enumerated || !enumerated.all.length) return null;
+  const hit = await walkTypeVersions(enumerated.all, enumerated.markerRe, (cand, res) => {
+    // Only interested in versions strictly NEWER than the reporter's.
+    if (requestedVersion && compareTypeVersions(cand.v, requestedVersion) >= 0) return undefined;
+    const scoped = scopeToResourceType(res.text, type, cand.v) || res.text;
+    if (!propertyNames.every(n => pageHasWord(scoped, n))) return undefined;
+    return { version: cand.v, url: typesMdBlobUrl(cand) };
+  });
+  return hit === undefined ? null : hit;
 }
 
 
