@@ -998,7 +998,7 @@ async function fetchDocsText(type, preferVersion) {
   const namespace = parts[0].toLowerCase();
   const slug = namespace.replace(/^microsoft\./, '');
   const generated = await listGenerated();
-  const slugRe = new RegExp(`^${slug.replace(/[.*+?^${}()|[\\]\\\\]/g, '\\$&')}(_\\d+)?$`);
+  const slugRe = new RegExp(`^${slug.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}(_\\d+)?$`);
   const candidates = generated.filter(n => slugRe.test(n));
   if (!candidates.length) {
     return { url: null, status: 404, text: null };
