@@ -26,22 +26,7 @@ const RP_REGEX = /(?<![.\/\w])Microsoft\.[A-Z][A-Za-z0-9]{2,}/g;
 const TYPE_REGEX = /(?<![.\/\w])Microsoft\.[A-Z][A-Za-z0-9]{2,}(?:\/[A-Za-z][A-Za-z0-9]*)+/g;
 
 // --- Missing-property heuristic ---
-// Detected by proximity: a "missing-ness" word near a "property" word (either
-// direction), or a missing-ness phrase followed by a plausible property name.
-
-// Generic "missing-ness" words and short phrases.
-const MISS_TERMS = [
-  'missing', 'lacks', 'lack', 'lacking',
-  'unrecognized', 'unsupported', 'unavailable',
-  'not allowed', 'not permitted', 'not recognized', 'not supported',
-  'not accepted', 'not exposed', 'not defined', 'not present',
-  'not listed', 'not available', "doesn't have", 'does not have',
-  "doesn't expose", 'does not expose', "doesn't include", 'does not include',
-  "doesn't support", 'does not support', "doesn't define", 'does not define',
-  'should have', 'should include', 'should support', 'should expose',
-  'should add', 'needs to have', 'needs to add', 'add support for',
-  'rejected',
-];
+// Property-word vocabulary the extraction anchors on.
 const PROP_TERMS = ['property', 'properties', 'field', 'fields', 'attribute', 'attributes'];
 
 // Build an alternation regex (escape spaces; '.' isn't used in any term).
@@ -49,19 +34,11 @@ const escapeRe = s => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 // Same, but also escapes '/' - for embedding a `Microsoft.X/y` resource type
 // in a regex.
 const escapeTypeRe = s => s.replace(/[.*+?^${}()|[\]\\/]/g, '\\$&');
-const missAlt = MISS_TERMS.map(escapeRe).join('|');
 const propAlt = PROP_TERMS.join('|');
 
 // Hyphen-aware boundaries so hyphenated ARM jargon ("reference-property")
 // isn't read as the user asserting a property is missing.
 const PROP_WORD_PATTERN = `(?<![\\w-])(?:${propAlt})(?![\\w-])`;
-// Direction-agnostic co-occurrence within a small same-line window.
-const MISS_NEAR_PROP = new RegExp(
-  `(?:\\b(?:${missAlt})\\b[^\\n.]{0,80}?${PROP_WORD_PATTERN})` +
-  `|` +
-  `(?:${PROP_WORD_PATTERN}[^\\n.]{0,80}?\\b(?:${missAlt})\\b)`,
-  'i'
-);
 
 // Property-name extraction takes the identifier nearest a "property" word,
 // preferring quoted tokens over bare camelCase, with a shorthand fallback.
@@ -417,7 +394,7 @@ const PROP_NOT_IN_DEFINITION = new RegExp(
   String.raw`\bproperty\s+${Q}${NAME}${Q}\s+does\s+not\s+exist\s+in\s+the\s+(?:resource\s+(?:or\s+type\s+)?|type\s+)?definition\b`, 'i');
 
 // Explicit "property is missing" phrases — a HIGH-CONFIDENCE missing-property
-// signal, unlike the loose proximity heuristic (MISS_NEAR_PROP).
+// signal, unlike a loose word-proximity heuristic.
 const EXPLICIT_MISSING_PROP_REGEXES = [
   // "<X> property is missing" / "<X> properties missing"
   new RegExp(String.raw`\b${NAME}\s+propert(?:y|ies)\s+(?:is\s+|are\s+)?missing\b`, 'i'),
@@ -1208,7 +1185,6 @@ const KEYWORD_TO_RP = [
   [/\bevent\s+hub\b/i, 'Microsoft.EventHub'],
   [/\bevent\s+grid\b/i, 'Microsoft.EventGrid'],
   [/\bapi\s+management\b/i, 'Microsoft.ApiManagement'],
-  [/\bcontainer\s+(?:registry|app|instance)s?\b/i, null],
   [/\bcontainer\s+registry\b/i, 'Microsoft.ContainerRegistry'],
   [/\bcontainer\s+app\b/i, 'Microsoft.App'],
   [/\baks\b|\bkubernetes\s+service\b/i, 'Microsoft.ContainerService'],
@@ -1220,7 +1196,7 @@ const KEYWORD_TO_RP = [
   [/\bpostgres(?:ql)?\b/i, 'Microsoft.DBforPostgreSQL'],
   [/\bmysql\b/i, 'Microsoft.DBforMySQL'],
   [/\bmachine\s+learning\b/i, 'Microsoft.MachineLearningServices'],
-].filter(([, rp]) => rp);
+];
 
 function keywordRpsFromTitle(title) {
   const hits = new Set();
@@ -1262,9 +1238,6 @@ core.info(
 const priorComments = await github.paginate(github.rest.issues.listComments, {
   owner, repo, issue_number: num, per_page: 100,
 });
-const alreadyTriaged = priorComments.some(c =>
-  c.user && c.user.type === 'Bot' && (c.body || '').includes(MARKER)
-);
 
 // --- Property verification against generated types (needs named properties + a type) ---
 // propertyVerification: { found: bool, url, type, version, property, results: [{name, found}] }
