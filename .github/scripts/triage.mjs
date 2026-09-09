@@ -34,6 +34,8 @@ const escapeRe = s => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 // Same, but also escapes '/' - for embedding a `Microsoft.X/y` resource type
 // in a regex.
 const escapeTypeRe = s => s.replace(/[.*+?^${}()|[\]\\/]/g, '\\$&');
+// True when any of `regexes` matches any of `texts`.
+const anyMatch = (regexes, ...texts) => texts.some(t => regexes.some(r => r.test(t)));
 const propAlt = PROP_TERMS.join('|');
 
 // Hyphen-aware boundaries so hyphenated ARM jargon ("reference-property")
@@ -45,6 +47,16 @@ const PROP_WORD_PATTERN = `(?<![\\w-])(?:${propAlt})(?![\\w-])`;
 const PROP_WORD_REGEX = new RegExp(PROP_WORD_PATTERN, 'gi');
 const QUOTED_IDENT = /[`'"]([A-Za-z_][\w.-]*)[`'"]/g;
 const CAMEL_IDENT = /\b([A-Za-z_][\w.-]*)\b/g;
+
+// Identifier shape for the anchor-free "missing <name>" shorthands: a
+// camelCase hump or an embedded digit run marks it as a property, not prose.
+const SHORTHAND_IDENT = String.raw`([a-z][a-zA-Z0-9]*(?:[A-Z][A-Za-z0-9]{2,}|[0-9][A-Za-z]{2,}))`;
+const SHORTHAND_MISSING_REGEXES = [
+  // "missing <name>"
+  new RegExp(String.raw`\b[Mm]issing\s+[\`'"]?${SHORTHAND_IDENT}[\`'"]?\b`, 'g'),
+  // Reverse: "<name> (is) missing"
+  new RegExp(String.raw`\b${SHORTHAND_IDENT}[\`'"]?\s+(?:is\s+|are\s+|was\s+|were\s+)?[Mm]issing\b`, 'g'),
+];
 
 // Signals that the issue is about a missing *resource* or a deployment
 // failure, not a missing schema property.
@@ -157,20 +169,22 @@ function extractPropertyCandidates(text, excludeNames) {
   excludeNames = excludeNames || new Set();
   const candidates = [];
   const seen = new Set(); // dedupe by lowercased name
+  const push = (name, offset, quoted, distance) => {
+    if (!isPlausiblePropertyName(name)) return;
+    if (excludeNames.has(name.toLowerCase())) return;
+    const key = name.toLowerCase();
+    if (seen.has(key)) return;
+    seen.add(key);
+    candidates.push({ name, offset, quoted, distance });
+  };
   const propMatches = [...text.matchAll(PROP_WORD_REGEX)];
   for (const pm of propMatches) {
     const idx = pm.index;
     const winStart = Math.max(0, idx - 60);
     const winEnd = Math.min(text.length, idx + pm[0].length + 60);
     const window = text.slice(winStart, winEnd);
-    const addCandidate = (name, offset, quoted) => {
-      if (!isPlausiblePropertyName(name)) return;
-      if (excludeNames.has(name.toLowerCase())) return;
-      const key = name.toLowerCase();
-      if (seen.has(key)) return;
-      seen.add(key);
-      candidates.push({ name, offset, quoted, distance: Math.abs(offset - idx) });
-    };
+    const addCandidate = (name, offset, quoted) =>
+      push(name, offset, quoted, Math.abs(offset - idx));
     let qm;
     QUOTED_IDENT.lastIndex = 0;
     while ((qm = QUOTED_IDENT.exec(window)) !== null) {
@@ -194,31 +208,13 @@ function extractPropertyCandidates(text, excludeNames) {
       addCandidate(cm[1], winStart + cm.index, false);
     }
   }
-  // "missing <name>" shorthand. A camelCase hump OR an embedded digit run is
-  // enough of an identifier signal to separate a property from a prose word.
-  const shorthandRe = /\b[Mm]issing\s+[`'"]?([a-z][a-zA-Z0-9]*(?:[A-Z][A-Za-z0-9]{2,}|[0-9][A-Za-z]{2,}))[`'"]?\b/g;
-  let sm;
-  while ((sm = shorthandRe.exec(text)) !== null) {
-    const name = sm[1];
-    if (!isPlausiblePropertyName(name)) continue;
-    if (excludeNames.has(name.toLowerCase())) continue;
-    const key = name.toLowerCase();
-    if (seen.has(key)) continue;
-    seen.add(key);
-    candidates.push({ name, offset: sm.index, quoted: true, distance: 0 });
-  }
-  // Reverse shorthand: "<name> (is) missing". There is no prop-word anchor in
-  // such titles, so require the camelCase shape to avoid firing on prose.
-  const shorthandRe2 = /\b([a-z][a-zA-Z0-9]*(?:[A-Z][A-Za-z0-9]{2,}|[0-9][A-Za-z]{2,}))[`'"]?\s+(?:is\s+|are\s+|was\s+|were\s+)?[Mm]issing\b/g;
-  let sm2;
-  while ((sm2 = shorthandRe2.exec(text)) !== null) {
-    const name = sm2[1];
-    if (!isPlausiblePropertyName(name)) continue;
-    if (excludeNames.has(name.toLowerCase())) continue;
-    const key = name.toLowerCase();
-    if (seen.has(key)) continue;
-    seen.add(key);
-    candidates.push({ name, offset: sm2.index, quoted: true, distance: 0 });
+  // Shorthand forms with no prop-word anchor. A camelCase hump OR an embedded
+  // digit run is enough of an identifier signal to separate a property from a
+  // prose word, so require that shape to avoid firing on prose.
+  for (const re of SHORTHAND_MISSING_REGEXES) {
+    re.lastIndex = 0;
+    let sm;
+    while ((sm = re.exec(text)) !== null) push(sm[1], sm.index, true, 0);
   }
   candidates.sort((a, b) => (b.quoted - a.quoted) || (a.distance - b.distance));
   return candidates;
@@ -271,6 +267,8 @@ const botGenericTitleRe = (...extra) => new RegExp(
 function extractErrorPatterns(text) {
   const properties = [];
   const containerTypes = [];
+  // `propGroup`/`typeGroup` name which capture holds which, so patterns that
+  // mention the container type first can share one loop.
   const patterns = [
     String.raw`(?:the\s+)?property\s+${QIDENT}\s+is\s+(?:not\s+)?allowed\s+on\s+(?:objects?\s+of\s+)?type\s+${QIDENT}`,
     String.raw`${QIDENT}\s+is\s+not\s+a\s+valid\s+property\s+(?:of|on)\s+(?:type\s+)?${QIDENT}`,
@@ -282,24 +280,18 @@ function extractErrorPatterns(text) {
     String.raw`property\s+${QIDENT}\s+of\s+(?:type\s+)?${QIDENT}`,
     // A Bicep diagnostic code ("BCP187 for `kind`") makes this high-confidence.
     String.raw`\bBCP\d+\b(?:\s+(?:warning|error))?\s+(?:for|on)\s+${QIDENT}`,
-  ].map(src => new RegExp(src, 'gi'));
-  for (const re of patterns) {
+  ].map(src => ({ re: new RegExp(src, 'gi'), propGroup: 1, typeGroup: 2 }));
+  // Container type named BEFORE the property, so the groups are reversed.
+  patterns.push({
+    re: new RegExp(String.raw`\btype\s+${QIDENT}\s+does(?:\s+not|n['’]?t)\s+(?:contain|include|define|declare|have)\s+(?:the\s+|a\s+)?(?:property|member)\s+${QIDENT}`, 'gi'),
+    propGroup: 2,
+    typeGroup: 1,
+  });
+  for (const { re, propGroup, typeGroup } of patterns) {
     let m;
     while ((m = re.exec(text)) !== null) {
-      if (isPlausiblePropertyName(m[1])) properties.push(m[1]);
-      if (m[2]) containerTypes.push(m[2]);
-    }
-  }
-  // Patterns where the container type is named BEFORE the property, so the
-  // capture groups are reversed relative to the ones above.
-  const reversedPatterns = [
-    new RegExp(String.raw`\btype\s+${QIDENT}\s+does(?:\s+not|n['’]?t)\s+(?:contain|include|define|declare|have)\s+(?:the\s+|a\s+)?(?:property|member)\s+${QIDENT}`, 'gi'),
-  ];
-  for (const re of reversedPatterns) {
-    let m;
-    while ((m = re.exec(text)) !== null) {
-      if (m[1]) containerTypes.push(m[1]);
-      if (isPlausiblePropertyName(m[2])) properties.push(m[2]);
+      if (isPlausiblePropertyName(m[propGroup])) properties.push(m[propGroup]);
+      if (m[typeGroup]) containerTypes.push(m[typeGroup]);
     }
   }
   return { properties, containerTypes };
@@ -775,14 +767,10 @@ function classify(text, opts) {
   // force-enables its own category and suppresses categories listing it in
   // `suppressedBy`. Note definitively-bug does not by itself apply the `bug`
   // label; that still needs a real bug signal.
-  const hasDefinitivelyMissing =
-    DEFINITIVELY_MISSING_REGEXES.some(r => r.test(bodyProse)) ||
-    DEFINITIVELY_MISSING_REGEXES.some(r => r.test(title || ''));
+  const hasDefinitivelyMissing = anyMatch(DEFINITIVELY_MISSING_REGEXES, bodyProse, title || '');
   if (hasDefinitivelyMissing) hasMP = true;
 
-  const hasDefinitivelyBug =
-    DEFINITIVELY_BUG_REGEXES.some(r => r.test(bodyProse)) ||
-    DEFINITIVELY_BUG_REGEXES.some(r => r.test(title || ''));
+  const hasDefinitivelyBug = anyMatch(DEFINITIVELY_BUG_REGEXES, bodyProse, title || '');
 
   // Resolve every category from the ISSUE_CATEGORIES table. Order matters
   // only for `suppressedBy`, which reads flags decided earlier in the table.
@@ -919,45 +907,35 @@ export {
 export async function run({ github, context, core }) {
 
 // --- Property verification via Azure/bicep-types-az generated types.md ---
-// Cache directory listings so we don't refetch across property lookups.
-const generatedListCache = { promise: null };
+// Cache directory listings so we don't refetch across property lookups. The
+// PROMISE is cached (not the resolved value) so concurrent callers share one
+// in-flight request.
 const dirCache = new Map();
-async function listGenerated() {
-  if (!generatedListCache.promise) {
-    generatedListCache.promise = (async () => {
-      try {
-        // Paginated so a `generated/` tree past the contents API's
-        // single-page cap still lists in full.
-        const data = await github.paginate(github.rest.repos.getContent, {
-          owner: TYPES_OWNER, repo: TYPES_NAME, path: 'generated',
-          ref: TYPES_BRANCH, per_page: 100,
-          headers: { 'user-agent': UA },
-        });
-        return (Array.isArray(data) ? data : []).map(e => e.name);
-      } catch (e) {
-        core.warning(`listGenerated failed: ${e.message}`);
-        return [];
-      }
-    })();
-  }
-  return generatedListCache.promise;
-}
-async function listContents(path) {
+function listDir(path) {
   if (dirCache.has(path)) return dirCache.get(path);
   const p = (async () => {
     try {
+      // Paginated so a tree past the contents API's single-page cap still
+      // lists in full.
       const data = await github.paginate(github.rest.repos.getContent, {
         owner: TYPES_OWNER, repo: TYPES_NAME, path,
         ref: TYPES_BRANCH, per_page: 100,
         headers: { 'user-agent': UA },
       });
-      return (Array.isArray(data) ? data : []).map(e => ({ name: e.name, type: e.type }));
+      return Array.isArray(data) ? data : [];
     } catch (e) {
+      if (path === 'generated') core.warning(`listGenerated failed: ${e.message}`);
       return [];
     }
   })();
   dirCache.set(path, p);
   return p;
+}
+async function listGenerated() {
+  return (await listDir('generated')).map(e => e.name);
+}
+async function listContents(path) {
+  return (await listDir(path)).map(e => ({ name: e.name, type: e.type }));
 }
 // fetch() with an abort-based timeout so a hung raw.githubusercontent.com
 // request can't stall the whole triage job.
@@ -1448,12 +1426,21 @@ const titleIsPlaceholder = /^\s*\[\s*<?\s*resource[_\s]?type\s*>?\s*\]\s*:\s*<?\
 // A neutral category placeholder the bot generated. We own these and must
 // correct them when the category changes underneath us.
 const titleIsBotGeneric = botGenericTitleRe().test(issue.title || '');
+// `[<type>]: a, b properties missing` — the canonical mined title.
+const missingPropsTitle = () => {
+  const props = cls.propertyNames.slice(0, 3).join(', ');
+  const wordForm = cls.propertyNames.length > 1 ? 'properties' : 'property';
+  return `[${cls.types[0]}]: ${props} ${wordForm} missing`;
+};
+// Neutral title for the missing-ness categories when no property was mined.
+const genericMissingTitle = () =>
+  (cls.hasTypeUnavailableLanguage && !cls.hasMissingPropertyLanguage)
+    ? `[${cls.types[0]}]: Type is unavailable`
+    : `[${cls.types[0]}]: Missing property`;
 if (cls.propertyNames.length > 0 && cls.types.length > 0 &&
     (cls.hasMissingPropertyLanguage || titleIsBotOwned) &&
     !(propertyVerification && propertyVerification.found && !titleIsBotOwned)) {
-  const propsForTitle = cls.propertyNames.slice(0, 3).join(', ');
-  const wordForm = cls.propertyNames.length > 1 ? 'properties' : 'property';
-  const normalizedTitle = `[${cls.types[0]}]: ${propsForTitle} ${wordForm} missing`;
+  const normalizedTitle = missingPropsTitle();
   if (issue.title !== normalizedTitle) {
     await github.rest.issues.update({
       owner, repo, issue_number: num, title: normalizedTitle,
@@ -1466,9 +1453,7 @@ if (cls.propertyNames.length > 0 && cls.types.length > 0 &&
   // Either a title we generated or a freeform `[Microsoft.X/y]: <description>`,
   // and re-mining the body yields no property name. Normalize to a neutral,
   // category-appropriate title rather than leaving a wrong one in place.
-  const generic = (cls.hasTypeUnavailableLanguage && !cls.hasMissingPropertyLanguage)
-    ? `[${cls.types[0]}]: Type is unavailable`
-    : `[${cls.types[0]}]: Missing property`;
+  const generic = genericMissingTitle();
   if (issue.title !== generic) {
     await github.rest.issues.update({
       owner, repo, issue_number: num, title: generic,
@@ -1515,13 +1500,9 @@ if (cls.propertyNames.length > 0 && cls.types.length > 0 &&
   const isMissingCat = cls.hasMissingPropertyLanguage || cls.hasTypeUnavailableLanguage;
   let target;
   if (isMissingCat && cls.propertyNames.length > 0 && !verifiedFound) {
-    const props = cls.propertyNames.slice(0, 3).join(', ');
-    const wordForm = cls.propertyNames.length > 1 ? 'properties' : 'property';
-    target = `[${cls.types[0]}]: ${props} ${wordForm} missing`;
+    target = missingPropsTitle();
   } else if (isMissingCat) {
-    target = (cls.hasTypeUnavailableLanguage && !cls.hasMissingPropertyLanguage)
-      ? `[${cls.types[0]}]: Type is unavailable`
-      : `[${cls.types[0]}]: Missing property`;
+    target = genericMissingTitle();
   } else {
     // Type-issue-only placeholder (inaccurate property type/desc).
     target = `[${cls.types[0]}]: Type issue`;
