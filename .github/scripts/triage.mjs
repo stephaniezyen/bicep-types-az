@@ -248,10 +248,22 @@ const Q = '["\'`]';                       // a quote character: " ' or `
 const NAME = '([A-Za-z_][\\w.-]*)';       // captured identifier
 const IDENT = `${Q}?${NAME}${Q}?`;        // identifier, surrounding quotes optional
 const QIDENT = `${Q}\\**${NAME}\\**${Q}`; // quoted identifier, **bold** markers tolerated
-const DOESNT = "doesn['']?t|does\\s+not"; // negated-verb alternatives; kept as
-const DONT = "don['']?t|do\\s+not";       // separate halves so each call site can
-const DOES_NOT = "does(?:\\s+not|n['']?t)"; // reproduce its own alternation order
+// Negated-verb alternation: "doesn't"/"does not", "don't"/"do not". Fully
+// grouped so it can be interpolated bare or inside a larger alternation.
+const neg = verb => `(?:${verb}n['']?t|${verb}\\s+not)`;
+const DOESNT = neg('does');
+const DONT = neg('do');
 const gap = n => `[^\\n]{0,${n}}?`;       // non-greedy same-line filler
+
+// The `[Microsoft.X/y]: ...` title prefix the bot owns.
+const BOT_TITLE_PREFIX = String.raw`^\s*\[Microsoft\.[^\]]+\]:`;
+// Neutral category placeholders the bot generates for titles it owns.
+const BOT_GENERIC_TITLES = [
+  'Missing property', 'Type is unavailable', 'Type issue',
+  'Inaccurate/confusing description',
+];
+const botGenericTitleRe = (...extra) => new RegExp(
+  `${BOT_TITLE_PREFIX}\\s+(?:${[...BOT_GENERIC_TITLES, ...extra].join('|')})\\s*$`, 'i');
 
 // High-confidence extraction from ARM/Bicep error messages that name BOTH the
 // property and its container type. Returns { properties, containerTypes };
@@ -403,9 +415,9 @@ const EXPLICIT_MISSING_PROP_REGEXES = [
   new RegExp(String.raw`\bmissing\s+propert(?:y|ies)(?:\s*\(s\))?[\s:]+${IDENT}`, 'i'),
   new RegExp(String.raw`\bis\s+missing\s+(?:the\s+)?${IDENT}\s+property\b`, 'i'),
   // Inverted: "does not expose / doesn't have / does not include <X> property"
-  new RegExp(String.raw`\b(?:${DOESNT}|do\s+not|don['']?t)\s+(?:expose|include|have|contain|define|support)\s+(?:an?\s+|the\s+)?${IDENT}\s+propert`, 'i'),
+  new RegExp(String.raw`\b(?:${DOESNT}|${DONT})\s+(?:expose|include|have|contain|define|support)\s+(?:an?\s+|the\s+)?${IDENT}\s+propert`, 'i'),
   // "type definition does not expose (a|the) <X>"
-  new RegExp(String.raw`\btype\s+(?:definition\s+)?(?:${DOESNT})\s+(?:expose|include|have|contain|define)\s+(?:an?\s+|the\s+)?${IDENT}\b`, 'i'),
+  new RegExp(String.raw`\btype\s+(?:definition\s+)?${DOESNT}\s+(?:expose|include|have|contain|define)\s+(?:an?\s+|the\s+)?${IDENT}\b`, 'i'),
   // "lacks (a|the) <X> property" / "lacking <X>"
   new RegExp(String.raw`\black(?:s|ing)?\s+(?:an?\s+|the\s+)?${IDENT}\s+propert`, 'i'),
   // "no <X> property"
@@ -478,7 +490,7 @@ const ISSUE_CATEGORIES = [
     prosePatterns: [
       /\b(?:resource\s+)?type\s+(?:is\s+)?(?:unavailable|not\s+available|not\s+found)\b/i,
       /\bresource\s+type\s+(?:is\s+)?missing\b/i,
-      new RegExp(String.raw`\btype\s+${DOES_NOT}\s+exist\b`, 'i'),
+      new RegExp(String.raw`\btype\s+${DOESNT}\s+exist\b`, 'i'),
       /\bno\s+such\s+resource\s+type\b/i,
       /\bunknown\s+resource\s+type\b/i,
       /\bBCP081\b/i,
@@ -520,7 +532,7 @@ const ISSUE_CATEGORIES = [
       new RegExp(String.raw`\bdescription\s+(?:for|of)\b${gap(80)}\bis\s+(?:inaccurate|incomplete|incorrect|wrong|confusing|misleading|unclear|outdated|missing)\b`, 'i'),
       /\bdescription\s+(?:is\s+)?(?:inaccurate|incomplete|incorrect|wrong|confusing|misleading|unclear|outdated)\b/i,
       new RegExp(String.raw`\b(?:doc|docs|documentation)\s+(?:for|of|on)\b${gap(80)}\b(?:is\s+)?(?:inaccurate|incomplete|incorrect|wrong|confusing|misleading|unclear|outdated)\b`, 'i'),
-      new RegExp(String.raw`\bdocumentation\s+${DOES_NOT}\s+(?:mention|explain|describe|cover|say)\b`, 'i'),
+      new RegExp(String.raw`\bdocumentation\s+${DOESNT}\s+(?:mention|explain|describe|cover|say)\b`, 'i'),
     ],
     proseNeedsNoTemplate: true,
     suppressedBy: ['definitively-bug'],
@@ -564,7 +576,7 @@ const ISSUE_CATEGORIES = [
       new RegExp(String.raw`\b(?:I\s+)?(?:${DONT}|cannot|can['']?t)\s+understand\s+(?:this|the|that)?\s*error\b`, 'i'),
       /\bhas\s+no\s+effect\s+on\s+(?:deployment|the\s+resource|the\s+deploy)\b/i,
       /\bsetting\s+\S+\s+is\s+ignored\b/i,
-      new RegExp(String.raw`\b${DOES_NOT}\s+(?:change|affect|modify)\s+anything\b`, 'i'),
+      new RegExp(String.raw`\b${DOESNT}\s+(?:change|affect|modify)\s+anything\b`, 'i'),
       /\bunexpected(?:ly)?\s+(?:fails|behavior|behaviour)\b/i,
       /\b(?:bug|defect)\s+in\s+(?:the\s+)?(?:resource\s+provider|RP|API|service)\b/i,
       /\bintermittent(?:ly)?\s+(?:fail|fails|failing|breaks|errors)\b/i,
@@ -628,7 +640,8 @@ function normalizeNs(raw) {
 
 // API version extraction. Date-based ARM versions with optional stage suffix
 // and revision number.
-const VERSION_TOKEN = /\b(\d{4}-\d{2}-\d{2}(?:-(?:preview|beta|alpha|privatepreview)(?:-\d+)?)?)\b/g;
+const VER = String.raw`\d{4}-\d{2}-\d{2}(?:-(?:preview|beta|alpha|privatepreview)(?:-\d+)?)?`;
+const VERSION_TOKEN = new RegExp(String.raw`\b(${VER})\b`, 'g');
 function extractApiVersion(title, body) {
   const text = (title || '') + '\n' + (body || '');
   // 1. Azure issue-template "### Api Version" block, tolerating both the
@@ -642,10 +655,10 @@ function extractApiVersion(title, body) {
   }
   VERSION_TOKEN.lastIndex = 0;
   // 2. `<type>@<version>` in resource declarations.
-  const atVer = /Microsoft\.[A-Z][A-Za-z0-9]*\/[^\s'"`@]+@(\d{4}-\d{2}-\d{2}(?:-(?:preview|beta|alpha|privatepreview)(?:-\d+)?)?)/.exec(text);
+  const atVer = new RegExp("Microsoft\\.[A-Z][A-Za-z0-9]*\\/[^\\s'\"`@]+@(" + VER + ")").exec(text);
   if (atVer) return atVer[1];
   // 3. apiVersion: '<version>' / "apiVersion": "<version>".
-  const apiVer = /["']?api[Vv]ersion["']?\s*[:=]\s*["']?(\d{4}-\d{2}-\d{2}(?:-(?:preview|beta|alpha|privatepreview)(?:-\d+)?)?)["']?/.exec(text);
+  const apiVer = new RegExp(String.raw`["']?api[Vv]ersion["']?\s*[:=]\s*["']?(${VER})["']?`).exec(text);
   if (apiVer) return apiVer[1];
   // 4. Fallback: most-frequently mentioned bare version token.
   const counts = new Map();
@@ -724,7 +737,8 @@ function classify(text, opts) {
   // Whether the mining title is the bot's own canonical renamed format.
   // Normally false, since miningTitle is the reporter's original title.
   const isBotRenamedTitle =
-    /^\s*\[Microsoft\.[^\]]+\]:\s+[\w.,\s-]+\s+propert(?:y|ies)\s+missing\s*$/i.test(miningTitle || '');
+    new RegExp(`${BOT_TITLE_PREFIX}\\s+[\\w.,\\s-]+\\s+propert(?:y|ies)\\s+missing\\s*$`, 'i')
+      .test(miningTitle || '');
   const propertyNames = extractAllMissingProperties(
     stripTemplate(miningTitle || ''),
     stripTemplate(body || ''),
@@ -1148,7 +1162,7 @@ const text = `${issue.title || ''}\n\n${issue.body || ''}`;
 // Recover the reporter's ORIGINAL title so we mine genuine user wording rather
 // than the bot's prior output. Only pay for the timeline lookup when the
 // current title is one WE prefixed; otherwise it already is the original.
-const titleLooksBotPrefixed = /^\s*\[Microsoft\.[^\]]+\]:/.test(issue.title || '');
+const titleLooksBotPrefixed = new RegExp(BOT_TITLE_PREFIX).test(issue.title || '');
 const originalTitle = titleLooksBotPrefixed
   ? await getOriginalTitle(num, issue.title || '')
   : (issue.title || '');
@@ -1424,15 +1438,16 @@ if (dedupeVerdictIsTrustworthy) {
 // --- Title normalization for confirmed missing-property issues ---
 // Also runs when the current title is bot-canonical, so earlier noisy renames
 // get corrected even after the docs check reclassifies the issue.
-const titleIsBotOwned = /^\s*\[Microsoft\.[^\]]+\]:\s+.+\s+propert(?:y|ies)\s+missing\s*$/i.test(issue.title || '');
+const titleIsBotOwned = new RegExp(`${BOT_TITLE_PREFIX}\\s+.+\\s+propert(?:y|ies)\\s+missing\\s*$`, 'i')
+  .test(issue.title || '');
 // Any `[Microsoft.X/y]: <description>` title — the shape we always own and
 // normalize, even when a reporter wrote the description.
-const titleIsResourcePrefixed = /^\s*\[Microsoft\.[^\]]+\]:\s+\S/i.test(issue.title || '');
+const titleIsResourcePrefixed = new RegExp(`${BOT_TITLE_PREFIX}\\s+\\S`, 'i').test(issue.title || '');
 // The unedited issue-template default title, left verbatim by the reporter.
 const titleIsPlaceholder = /^\s*\[\s*<?\s*resource[_\s]?type\s*>?\s*\]\s*:\s*<?\s*description\s*>?\s*$/i.test(issue.title || '');
 // A neutral category placeholder the bot generated. We own these and must
 // correct them when the category changes underneath us.
-const titleIsBotGeneric = /^\s*\[Microsoft\.[^\]]+\]:\s+(?:Missing property|Type is unavailable|Type issue|Inaccurate\/confusing description)\s*$/i.test(issue.title || '');
+const titleIsBotGeneric = botGenericTitleRe().test(issue.title || '');
 if (cls.propertyNames.length > 0 && cls.types.length > 0 &&
     (cls.hasMissingPropertyLanguage || titleIsBotOwned) &&
     !(propertyVerification && propertyVerification.found && !titleIsBotOwned)) {
@@ -1480,9 +1495,7 @@ if (cls.propertyNames.length > 0 && cls.types.length > 0 &&
   // category. Restore the reporter's original pre-rename title when we can
   // recover one that isn't itself a bot generic; otherwise leave it alone —
   // a placeholder like "Needs triage" reads oddly and buries the type.
-  const originalIsBotGeneric =
-    /^\s*\[Microsoft\.[^\]]+\]:\s+(?:Missing property|Type is unavailable|Type issue|Inaccurate\/confusing description|Needs triage)\s*$/i
-      .test(originalTitle || '');
+  const originalIsBotGeneric = botGenericTitleRe('Needs triage').test(originalTitle || '');
   if (originalTitle && originalTitle !== issue.title && !originalIsBotGeneric) {
     await github.rest.issues.update({
       owner, repo, issue_number: num, title: originalTitle,
