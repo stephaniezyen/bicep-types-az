@@ -82,7 +82,7 @@ const RESOURCE_NOT_FOUND_RE = new RegExp(
 // usually in pasted JSON.
 const PROPERTY_NAME_STOPWORDS = new Set([
   // Schema vocabulary — the words the miner anchors on in the first place.
-  'property', 'properties', 'field', 'fields', 'attribute', 'attributes',
+  ...PROP_TERMS,
   'type', 'types', 'resource', 'resources', 'schema', 'definition', 'api', 'apis',
   // Primitive type names, which appear beside properties in pasted schemas
   // and error text.
@@ -494,7 +494,6 @@ const ISSUE_CATEGORIES = [
       /\btypes?\s+(?:not\s+)?(?:yet\s+)?(?:generated|published|defined)\b/i,
       /\bmissing\s+(?:resource\s+)?type\s+definition\b/i,
       // ARM runtime: "The resource type 'X' could not be found in the namespace 'Y'"
-      /\bresource\s+type\s+["'`][^"'`\n]+["'`]\s+could\s+not\s+be\s+found\s+in\s+the\s+namespace\b/i,
       /\bcould\s+not\s+be\s+found\s+in\s+the\s+namespace\b/i,
     ],
     suppressedBy: ['definitively-bug'],
@@ -547,7 +546,9 @@ const ISSUE_CATEGORIES = [
       new RegExp(String.raw`\brejects?\b${gap(40)}\b(?:string|int|integer|number|bool|boolean|array|value)\b`, 'i'),
       // Classic Bicep type-mismatch diagnostic.
       new RegExp(String.raw`\bexpected\s+a?\s*value\s+of\s+type\b${gap(80)}\bprovided\s+value\s+is\s+of\s+type\b`, 'i'),
-      // Inline template value.
+      // Inline template value, for reporters who write it as freeform prose
+      // instead of selecting it in the template. Not covered by the
+      // `templatePatterns` copy — that only ever sees the `### Issue Type` value.
       /\binaccurate\s+propert(?:y|ies)?\s+type/i,
     ],
     proseBlockedByTemplate: ['description-issue'],
