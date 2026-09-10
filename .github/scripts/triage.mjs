@@ -26,22 +26,7 @@ const RP_REGEX = /(?<![.\/\w])Microsoft\.[A-Z][A-Za-z0-9]{2,}/g;
 const TYPE_REGEX = /(?<![.\/\w])Microsoft\.[A-Z][A-Za-z0-9]{2,}(?:\/[A-Za-z][A-Za-z0-9]*)+/g;
 
 // --- Missing-property heuristic ---
-// Detected by proximity: a "missing-ness" word near a "property" word (either
-// direction), or a missing-ness phrase followed by a plausible property name.
-
-// Generic "missing-ness" words and short phrases.
-const MISS_TERMS = [
-  'missing', 'lacks', 'lack', 'lacking',
-  'unrecognized', 'unsupported', 'unavailable',
-  'not allowed', 'not permitted', 'not recognized', 'not supported',
-  'not accepted', 'not exposed', 'not defined', 'not present',
-  'not listed', 'not available', "doesn't have", 'does not have',
-  "doesn't expose", 'does not expose', "doesn't include", 'does not include',
-  "doesn't support", 'does not support', "doesn't define", 'does not define',
-  'should have', 'should include', 'should support', 'should expose',
-  'should add', 'needs to have', 'needs to add', 'add support for',
-  'rejected',
-];
+// Property-word vocabulary the extraction anchors on.
 const PROP_TERMS = ['property', 'properties', 'field', 'fields', 'attribute', 'attributes'];
 
 // Build an alternation regex (escape spaces; '.' isn't used in any term).
@@ -49,25 +34,29 @@ const escapeRe = s => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 // Same, but also escapes '/' - for embedding a `Microsoft.X/y` resource type
 // in a regex.
 const escapeTypeRe = s => s.replace(/[.*+?^${}()|[\]\\/]/g, '\\$&');
-const missAlt = MISS_TERMS.map(escapeRe).join('|');
+// True when any of `regexes` matches any of `texts`.
+const anyMatch = (regexes, ...texts) => texts.some(t => regexes.some(r => r.test(t)));
 const propAlt = PROP_TERMS.join('|');
 
 // Hyphen-aware boundaries so hyphenated ARM jargon ("reference-property")
 // isn't read as the user asserting a property is missing.
 const PROP_WORD_PATTERN = `(?<![\\w-])(?:${propAlt})(?![\\w-])`;
-// Direction-agnostic co-occurrence within a small same-line window.
-const MISS_NEAR_PROP = new RegExp(
-  `(?:\\b(?:${missAlt})\\b[^\\n.]{0,80}?${PROP_WORD_PATTERN})` +
-  `|` +
-  `(?:${PROP_WORD_PATTERN}[^\\n.]{0,80}?\\b(?:${missAlt})\\b)`,
-  'i'
-);
 
 // Property-name extraction takes the identifier nearest a "property" word,
 // preferring quoted tokens over bare camelCase, with a shorthand fallback.
 const PROP_WORD_REGEX = new RegExp(PROP_WORD_PATTERN, 'gi');
 const QUOTED_IDENT = /[`'"]([A-Za-z_][\w.-]*)[`'"]/g;
 const CAMEL_IDENT = /\b([A-Za-z_][\w.-]*)\b/g;
+
+// Identifier shape for the anchor-free "missing <name>" shorthands: a
+// camelCase hump or an embedded digit run marks it as a property, not prose.
+const SHORTHAND_IDENT = String.raw`([a-z][a-zA-Z0-9]*(?:[A-Z][A-Za-z0-9]{2,}|[0-9][A-Za-z]{2,}))`;
+const SHORTHAND_MISSING_REGEXES = [
+  // "missing <name>"
+  new RegExp(String.raw`\b[Mm]issing\s+[\`'"]?${SHORTHAND_IDENT}[\`'"]?\b`, 'g'),
+  // Reverse: "<name> (is) missing"
+  new RegExp(String.raw`\b${SHORTHAND_IDENT}[\`'"]?\s+(?:is\s+|are\s+|was\s+|were\s+)?[Mm]issing\b`, 'g'),
+];
 
 // Signals that the issue is about a missing *resource* or a deployment
 // failure, not a missing schema property.
@@ -93,7 +82,7 @@ const RESOURCE_NOT_FOUND_RE = new RegExp(
 // usually in pasted JSON.
 const PROPERTY_NAME_STOPWORDS = new Set([
   // Schema vocabulary — the words the miner anchors on in the first place.
-  'property', 'properties', 'field', 'fields', 'attribute', 'attributes',
+  ...PROP_TERMS,
   'type', 'types', 'resource', 'resources', 'schema', 'definition', 'api', 'apis',
   // Primitive type names, which appear beside properties in pasted schemas
   // and error text.
@@ -180,20 +169,22 @@ function extractPropertyCandidates(text, excludeNames) {
   excludeNames = excludeNames || new Set();
   const candidates = [];
   const seen = new Set(); // dedupe by lowercased name
+  const push = (name, offset, quoted, distance) => {
+    if (!isPlausiblePropertyName(name)) return;
+    if (excludeNames.has(name.toLowerCase())) return;
+    const key = name.toLowerCase();
+    if (seen.has(key)) return;
+    seen.add(key);
+    candidates.push({ name, offset, quoted, distance });
+  };
   const propMatches = [...text.matchAll(PROP_WORD_REGEX)];
   for (const pm of propMatches) {
     const idx = pm.index;
     const winStart = Math.max(0, idx - 60);
     const winEnd = Math.min(text.length, idx + pm[0].length + 60);
     const window = text.slice(winStart, winEnd);
-    const addCandidate = (name, offset, quoted) => {
-      if (!isPlausiblePropertyName(name)) return;
-      if (excludeNames.has(name.toLowerCase())) return;
-      const key = name.toLowerCase();
-      if (seen.has(key)) return;
-      seen.add(key);
-      candidates.push({ name, offset, quoted, distance: Math.abs(offset - idx) });
-    };
+    const addCandidate = (name, offset, quoted) =>
+      push(name, offset, quoted, Math.abs(offset - idx));
     let qm;
     QUOTED_IDENT.lastIndex = 0;
     while ((qm = QUOTED_IDENT.exec(window)) !== null) {
@@ -217,31 +208,13 @@ function extractPropertyCandidates(text, excludeNames) {
       addCandidate(cm[1], winStart + cm.index, false);
     }
   }
-  // "missing <name>" shorthand. A camelCase hump OR an embedded digit run is
-  // enough of an identifier signal to separate a property from a prose word.
-  const shorthandRe = /\b[Mm]issing\s+[`'"]?([a-z][a-zA-Z0-9]*(?:[A-Z][A-Za-z0-9]{2,}|[0-9][A-Za-z]{2,}))[`'"]?\b/g;
-  let sm;
-  while ((sm = shorthandRe.exec(text)) !== null) {
-    const name = sm[1];
-    if (!isPlausiblePropertyName(name)) continue;
-    if (excludeNames.has(name.toLowerCase())) continue;
-    const key = name.toLowerCase();
-    if (seen.has(key)) continue;
-    seen.add(key);
-    candidates.push({ name, offset: sm.index, quoted: true, distance: 0 });
-  }
-  // Reverse shorthand: "<name> (is) missing". There is no prop-word anchor in
-  // such titles, so require the camelCase shape to avoid firing on prose.
-  const shorthandRe2 = /\b([a-z][a-zA-Z0-9]*(?:[A-Z][A-Za-z0-9]{2,}|[0-9][A-Za-z]{2,}))[`'"]?\s+(?:is\s+|are\s+|was\s+|were\s+)?[Mm]issing\b/g;
-  let sm2;
-  while ((sm2 = shorthandRe2.exec(text)) !== null) {
-    const name = sm2[1];
-    if (!isPlausiblePropertyName(name)) continue;
-    if (excludeNames.has(name.toLowerCase())) continue;
-    const key = name.toLowerCase();
-    if (seen.has(key)) continue;
-    seen.add(key);
-    candidates.push({ name, offset: sm2.index, quoted: true, distance: 0 });
+  // Shorthand forms with no prop-word anchor. A camelCase hump OR an embedded
+  // digit run is enough of an identifier signal to separate a property from a
+  // prose word, so require that shape to avoid firing on prose.
+  for (const re of SHORTHAND_MISSING_REGEXES) {
+    re.lastIndex = 0;
+    let sm;
+    while ((sm = re.exec(text)) !== null) push(sm[1], sm.index, true, 0);
   }
   candidates.sort((a, b) => (b.quoted - a.quoted) || (a.distance - b.distance));
   return candidates;
@@ -271,10 +244,22 @@ const Q = '["\'`]';                       // a quote character: " ' or `
 const NAME = '([A-Za-z_][\\w.-]*)';       // captured identifier
 const IDENT = `${Q}?${NAME}${Q}?`;        // identifier, surrounding quotes optional
 const QIDENT = `${Q}\\**${NAME}\\**${Q}`; // quoted identifier, **bold** markers tolerated
-const DOESNT = "doesn['']?t|does\\s+not"; // negated-verb alternatives; kept as
-const DONT = "don['']?t|do\\s+not";       // separate halves so each call site can
-const DOES_NOT = "does(?:\\s+not|n['']?t)"; // reproduce its own alternation order
+// Negated-verb alternation: "doesn't"/"does not", "don't"/"do not". Fully
+// grouped so it can be interpolated bare or inside a larger alternation.
+const neg = verb => `(?:${verb}n['']?t|${verb}\\s+not)`;
+const DOESNT = neg('does');
+const DONT = neg('do');
 const gap = n => `[^\\n]{0,${n}}?`;       // non-greedy same-line filler
+
+// The `[Microsoft.X/y]: ...` title prefix the bot owns.
+const BOT_TITLE_PREFIX = String.raw`^\s*\[Microsoft\.[^\]]+\]:`;
+// Neutral category placeholders the bot generates for titles it owns.
+const BOT_GENERIC_TITLES = [
+  'Missing property', 'Type is unavailable', 'Type issue',
+  'Inaccurate/confusing description',
+];
+const botGenericTitleRe = (...extra) => new RegExp(
+  `${BOT_TITLE_PREFIX}\\s+(?:${[...BOT_GENERIC_TITLES, ...extra].join('|')})\\s*$`, 'i');
 
 // High-confidence extraction from ARM/Bicep error messages that name BOTH the
 // property and its container type. Returns { properties, containerTypes };
@@ -282,6 +267,8 @@ const gap = n => `[^\\n]{0,${n}}?`;       // non-greedy same-line filler
 function extractErrorPatterns(text) {
   const properties = [];
   const containerTypes = [];
+  // `propGroup`/`typeGroup` name which capture holds which, so patterns that
+  // mention the container type first can share one loop.
   const patterns = [
     String.raw`(?:the\s+)?property\s+${QIDENT}\s+is\s+(?:not\s+)?allowed\s+on\s+(?:objects?\s+of\s+)?type\s+${QIDENT}`,
     String.raw`${QIDENT}\s+is\s+not\s+a\s+valid\s+property\s+(?:of|on)\s+(?:type\s+)?${QIDENT}`,
@@ -293,24 +280,18 @@ function extractErrorPatterns(text) {
     String.raw`property\s+${QIDENT}\s+of\s+(?:type\s+)?${QIDENT}`,
     // A Bicep diagnostic code ("BCP187 for `kind`") makes this high-confidence.
     String.raw`\bBCP\d+\b(?:\s+(?:warning|error))?\s+(?:for|on)\s+${QIDENT}`,
-  ].map(src => new RegExp(src, 'gi'));
-  for (const re of patterns) {
+  ].map(src => ({ re: new RegExp(src, 'gi'), propGroup: 1, typeGroup: 2 }));
+  // Container type named BEFORE the property, so the groups are reversed.
+  patterns.push({
+    re: new RegExp(String.raw`\btype\s+${QIDENT}\s+does(?:\s+not|n['’]?t)\s+(?:contain|include|define|declare|have)\s+(?:the\s+|a\s+)?(?:property|member)\s+${QIDENT}`, 'gi'),
+    propGroup: 2,
+    typeGroup: 1,
+  });
+  for (const { re, propGroup, typeGroup } of patterns) {
     let m;
     while ((m = re.exec(text)) !== null) {
-      if (isPlausiblePropertyName(m[1])) properties.push(m[1]);
-      if (m[2]) containerTypes.push(m[2]);
-    }
-  }
-  // Patterns where the container type is named BEFORE the property, so the
-  // capture groups are reversed relative to the ones above.
-  const reversedPatterns = [
-    new RegExp(String.raw`\btype\s+${QIDENT}\s+does(?:\s+not|n['’]?t)\s+(?:contain|include|define|declare|have)\s+(?:the\s+|a\s+)?(?:property|member)\s+${QIDENT}`, 'gi'),
-  ];
-  for (const re of reversedPatterns) {
-    let m;
-    while ((m = re.exec(text)) !== null) {
-      if (m[1]) containerTypes.push(m[1]);
-      if (isPlausiblePropertyName(m[2])) properties.push(m[2]);
+      if (isPlausiblePropertyName(m[propGroup])) properties.push(m[propGroup]);
+      if (m[typeGroup]) containerTypes.push(m[typeGroup]);
     }
   }
   return { properties, containerTypes };
@@ -417,7 +398,7 @@ const PROP_NOT_IN_DEFINITION = new RegExp(
   String.raw`\bproperty\s+${Q}${NAME}${Q}\s+does\s+not\s+exist\s+in\s+the\s+(?:resource\s+(?:or\s+type\s+)?|type\s+)?definition\b`, 'i');
 
 // Explicit "property is missing" phrases — a HIGH-CONFIDENCE missing-property
-// signal, unlike the loose proximity heuristic (MISS_NEAR_PROP).
+// signal, unlike a loose word-proximity heuristic.
 const EXPLICIT_MISSING_PROP_REGEXES = [
   // "<X> property is missing" / "<X> properties missing"
   new RegExp(String.raw`\b${NAME}\s+propert(?:y|ies)\s+(?:is\s+|are\s+)?missing\b`, 'i'),
@@ -426,9 +407,9 @@ const EXPLICIT_MISSING_PROP_REGEXES = [
   new RegExp(String.raw`\bmissing\s+propert(?:y|ies)(?:\s*\(s\))?[\s:]+${IDENT}`, 'i'),
   new RegExp(String.raw`\bis\s+missing\s+(?:the\s+)?${IDENT}\s+property\b`, 'i'),
   // Inverted: "does not expose / doesn't have / does not include <X> property"
-  new RegExp(String.raw`\b(?:${DOESNT}|do\s+not|don['']?t)\s+(?:expose|include|have|contain|define|support)\s+(?:an?\s+|the\s+)?${IDENT}\s+propert`, 'i'),
+  new RegExp(String.raw`\b(?:${DOESNT}|${DONT})\s+(?:expose|include|have|contain|define|support)\s+(?:an?\s+|the\s+)?${IDENT}\s+propert`, 'i'),
   // "type definition does not expose (a|the) <X>"
-  new RegExp(String.raw`\btype\s+(?:definition\s+)?(?:${DOESNT})\s+(?:expose|include|have|contain|define)\s+(?:an?\s+|the\s+)?${IDENT}\b`, 'i'),
+  new RegExp(String.raw`\btype\s+(?:definition\s+)?${DOESNT}\s+(?:expose|include|have|contain|define)\s+(?:an?\s+|the\s+)?${IDENT}\b`, 'i'),
   // "lacks (a|the) <X> property" / "lacking <X>"
   new RegExp(String.raw`\black(?:s|ing)?\s+(?:an?\s+|the\s+)?${IDENT}\s+propert`, 'i'),
   // "no <X> property"
@@ -501,7 +482,7 @@ const ISSUE_CATEGORIES = [
     prosePatterns: [
       /\b(?:resource\s+)?type\s+(?:is\s+)?(?:unavailable|not\s+available|not\s+found)\b/i,
       /\bresource\s+type\s+(?:is\s+)?missing\b/i,
-      new RegExp(String.raw`\btype\s+${DOES_NOT}\s+exist\b`, 'i'),
+      new RegExp(String.raw`\btype\s+${DOESNT}\s+exist\b`, 'i'),
       /\bno\s+such\s+resource\s+type\b/i,
       /\bunknown\s+resource\s+type\b/i,
       /\bBCP081\b/i,
@@ -513,7 +494,6 @@ const ISSUE_CATEGORIES = [
       /\btypes?\s+(?:not\s+)?(?:yet\s+)?(?:generated|published|defined)\b/i,
       /\bmissing\s+(?:resource\s+)?type\s+definition\b/i,
       // ARM runtime: "The resource type 'X' could not be found in the namespace 'Y'"
-      /\bresource\s+type\s+["'`][^"'`\n]+["'`]\s+could\s+not\s+be\s+found\s+in\s+the\s+namespace\b/i,
       /\bcould\s+not\s+be\s+found\s+in\s+the\s+namespace\b/i,
     ],
     suppressedBy: ['definitively-bug'],
@@ -543,7 +523,7 @@ const ISSUE_CATEGORIES = [
       new RegExp(String.raw`\bdescription\s+(?:for|of)\b${gap(80)}\bis\s+(?:inaccurate|incomplete|incorrect|wrong|confusing|misleading|unclear|outdated|missing)\b`, 'i'),
       /\bdescription\s+(?:is\s+)?(?:inaccurate|incomplete|incorrect|wrong|confusing|misleading|unclear|outdated)\b/i,
       new RegExp(String.raw`\b(?:doc|docs|documentation)\s+(?:for|of|on)\b${gap(80)}\b(?:is\s+)?(?:inaccurate|incomplete|incorrect|wrong|confusing|misleading|unclear|outdated)\b`, 'i'),
-      new RegExp(String.raw`\bdocumentation\s+${DOES_NOT}\s+(?:mention|explain|describe|cover|say)\b`, 'i'),
+      new RegExp(String.raw`\bdocumentation\s+${DOESNT}\s+(?:mention|explain|describe|cover|say)\b`, 'i'),
     ],
     proseNeedsNoTemplate: true,
     suppressedBy: ['definitively-bug'],
@@ -566,7 +546,9 @@ const ISSUE_CATEGORIES = [
       new RegExp(String.raw`\brejects?\b${gap(40)}\b(?:string|int|integer|number|bool|boolean|array|value)\b`, 'i'),
       // Classic Bicep type-mismatch diagnostic.
       new RegExp(String.raw`\bexpected\s+a?\s*value\s+of\s+type\b${gap(80)}\bprovided\s+value\s+is\s+of\s+type\b`, 'i'),
-      // Inline template value.
+      // Inline template value, for reporters who write it as freeform prose
+      // instead of selecting it in the template. Not covered by the
+      // `templatePatterns` copy — that only ever sees the `### Issue Type` value.
       /\binaccurate\s+propert(?:y|ies)?\s+type/i,
     ],
     proseBlockedByTemplate: ['description-issue'],
@@ -587,7 +569,7 @@ const ISSUE_CATEGORIES = [
       new RegExp(String.raw`\b(?:I\s+)?(?:${DONT}|cannot|can['']?t)\s+understand\s+(?:this|the|that)?\s*error\b`, 'i'),
       /\bhas\s+no\s+effect\s+on\s+(?:deployment|the\s+resource|the\s+deploy)\b/i,
       /\bsetting\s+\S+\s+is\s+ignored\b/i,
-      new RegExp(String.raw`\b${DOES_NOT}\s+(?:change|affect|modify)\s+anything\b`, 'i'),
+      new RegExp(String.raw`\b${DOESNT}\s+(?:change|affect|modify)\s+anything\b`, 'i'),
       /\bunexpected(?:ly)?\s+(?:fails|behavior|behaviour)\b/i,
       /\b(?:bug|defect)\s+in\s+(?:the\s+)?(?:resource\s+provider|RP|API|service)\b/i,
       /\bintermittent(?:ly)?\s+(?:fail|fails|failing|breaks|errors)\b/i,
@@ -651,7 +633,8 @@ function normalizeNs(raw) {
 
 // API version extraction. Date-based ARM versions with optional stage suffix
 // and revision number.
-const VERSION_TOKEN = /\b(\d{4}-\d{2}-\d{2}(?:-(?:preview|beta|alpha|privatepreview)(?:-\d+)?)?)\b/g;
+const VER = String.raw`\d{4}-\d{2}-\d{2}(?:-(?:preview|beta|alpha|privatepreview)(?:-\d+)?)?`;
+const VERSION_TOKEN = new RegExp(String.raw`\b(${VER})\b`, 'g');
 function extractApiVersion(title, body) {
   const text = (title || '') + '\n' + (body || '');
   // 1. Azure issue-template "### Api Version" block, tolerating both the
@@ -665,10 +648,10 @@ function extractApiVersion(title, body) {
   }
   VERSION_TOKEN.lastIndex = 0;
   // 2. `<type>@<version>` in resource declarations.
-  const atVer = /Microsoft\.[A-Z][A-Za-z0-9]*\/[^\s'"`@]+@(\d{4}-\d{2}-\d{2}(?:-(?:preview|beta|alpha|privatepreview)(?:-\d+)?)?)/.exec(text);
+  const atVer = new RegExp("Microsoft\\.[A-Z][A-Za-z0-9]*\\/[^\\s'\"`@]+@(" + VER + ")").exec(text);
   if (atVer) return atVer[1];
   // 3. apiVersion: '<version>' / "apiVersion": "<version>".
-  const apiVer = /["']?api[Vv]ersion["']?\s*[:=]\s*["']?(\d{4}-\d{2}-\d{2}(?:-(?:preview|beta|alpha|privatepreview)(?:-\d+)?)?)["']?/.exec(text);
+  const apiVer = new RegExp(String.raw`["']?api[Vv]ersion["']?\s*[:=]\s*["']?(${VER})["']?`).exec(text);
   if (apiVer) return apiVer[1];
   // 4. Fallback: most-frequently mentioned bare version token.
   const counts = new Map();
@@ -747,7 +730,8 @@ function classify(text, opts) {
   // Whether the mining title is the bot's own canonical renamed format.
   // Normally false, since miningTitle is the reporter's original title.
   const isBotRenamedTitle =
-    /^\s*\[Microsoft\.[^\]]+\]:\s+[\w.,\s-]+\s+propert(?:y|ies)\s+missing\s*$/i.test(miningTitle || '');
+    new RegExp(`${BOT_TITLE_PREFIX}\\s+[\\w.,\\s-]+\\s+propert(?:y|ies)\\s+missing\\s*$`, 'i')
+      .test(miningTitle || '');
   const propertyNames = extractAllMissingProperties(
     stripTemplate(miningTitle || ''),
     stripTemplate(body || ''),
@@ -784,14 +768,10 @@ function classify(text, opts) {
   // force-enables its own category and suppresses categories listing it in
   // `suppressedBy`. Note definitively-bug does not by itself apply the `bug`
   // label; that still needs a real bug signal.
-  const hasDefinitivelyMissing =
-    DEFINITIVELY_MISSING_REGEXES.some(r => r.test(bodyProse)) ||
-    DEFINITIVELY_MISSING_REGEXES.some(r => r.test(title || ''));
+  const hasDefinitivelyMissing = anyMatch(DEFINITIVELY_MISSING_REGEXES, bodyProse, title || '');
   if (hasDefinitivelyMissing) hasMP = true;
 
-  const hasDefinitivelyBug =
-    DEFINITIVELY_BUG_REGEXES.some(r => r.test(bodyProse)) ||
-    DEFINITIVELY_BUG_REGEXES.some(r => r.test(title || ''));
+  const hasDefinitivelyBug = anyMatch(DEFINITIVELY_BUG_REGEXES, bodyProse, title || '');
 
   // Resolve every category from the ISSUE_CATEGORIES table. Order matters
   // only for `suppressedBy`, which reads flags decided earlier in the table.
@@ -928,45 +908,35 @@ export {
 export async function run({ github, context, core }) {
 
 // --- Property verification via Azure/bicep-types-az generated types.md ---
-// Cache directory listings so we don't refetch across property lookups.
-const generatedListCache = { promise: null };
+// Cache directory listings so we don't refetch across property lookups. The
+// PROMISE is cached (not the resolved value) so concurrent callers share one
+// in-flight request.
 const dirCache = new Map();
-async function listGenerated() {
-  if (!generatedListCache.promise) {
-    generatedListCache.promise = (async () => {
-      try {
-        // Paginated so a `generated/` tree past the contents API's
-        // single-page cap still lists in full.
-        const data = await github.paginate(github.rest.repos.getContent, {
-          owner: TYPES_OWNER, repo: TYPES_NAME, path: 'generated',
-          ref: TYPES_BRANCH, per_page: 100,
-          headers: { 'user-agent': UA },
-        });
-        return (Array.isArray(data) ? data : []).map(e => e.name);
-      } catch (e) {
-        core.warning(`listGenerated failed: ${e.message}`);
-        return [];
-      }
-    })();
-  }
-  return generatedListCache.promise;
-}
-async function listContents(path) {
+function listDir(path) {
   if (dirCache.has(path)) return dirCache.get(path);
   const p = (async () => {
     try {
+      // Paginated so a tree past the contents API's single-page cap still
+      // lists in full.
       const data = await github.paginate(github.rest.repos.getContent, {
         owner: TYPES_OWNER, repo: TYPES_NAME, path,
         ref: TYPES_BRANCH, per_page: 100,
         headers: { 'user-agent': UA },
       });
-      return (Array.isArray(data) ? data : []).map(e => ({ name: e.name, type: e.type }));
+      return Array.isArray(data) ? data : [];
     } catch (e) {
+      if (path === 'generated') core.warning(`listGenerated failed: ${e.message}`);
       return [];
     }
   })();
   dirCache.set(path, p);
   return p;
+}
+async function listGenerated() {
+  return (await listDir('generated')).map(e => e.name);
+}
+async function listContents(path) {
+  return (await listDir(path)).map(e => ({ name: e.name, type: e.type }));
 }
 // fetch() with an abort-based timeout so a hung raw.githubusercontent.com
 // request can't stall the whole triage job.
@@ -1171,7 +1141,7 @@ const text = `${issue.title || ''}\n\n${issue.body || ''}`;
 // Recover the reporter's ORIGINAL title so we mine genuine user wording rather
 // than the bot's prior output. Only pay for the timeline lookup when the
 // current title is one WE prefixed; otherwise it already is the original.
-const titleLooksBotPrefixed = /^\s*\[Microsoft\.[^\]]+\]:/.test(issue.title || '');
+const titleLooksBotPrefixed = new RegExp(BOT_TITLE_PREFIX).test(issue.title || '');
 const originalTitle = titleLooksBotPrefixed
   ? await getOriginalTitle(num, issue.title || '')
   : (issue.title || '');
@@ -1208,7 +1178,6 @@ const KEYWORD_TO_RP = [
   [/\bevent\s+hub\b/i, 'Microsoft.EventHub'],
   [/\bevent\s+grid\b/i, 'Microsoft.EventGrid'],
   [/\bapi\s+management\b/i, 'Microsoft.ApiManagement'],
-  [/\bcontainer\s+(?:registry|app|instance)s?\b/i, null],
   [/\bcontainer\s+registry\b/i, 'Microsoft.ContainerRegistry'],
   [/\bcontainer\s+app\b/i, 'Microsoft.App'],
   [/\baks\b|\bkubernetes\s+service\b/i, 'Microsoft.ContainerService'],
@@ -1220,7 +1189,7 @@ const KEYWORD_TO_RP = [
   [/\bpostgres(?:ql)?\b/i, 'Microsoft.DBforPostgreSQL'],
   [/\bmysql\b/i, 'Microsoft.DBforMySQL'],
   [/\bmachine\s+learning\b/i, 'Microsoft.MachineLearningServices'],
-].filter(([, rp]) => rp);
+];
 
 function keywordRpsFromTitle(title) {
   const hits = new Set();
@@ -1262,9 +1231,6 @@ core.info(
 const priorComments = await github.paginate(github.rest.issues.listComments, {
   owner, repo, issue_number: num, per_page: 100,
 });
-const alreadyTriaged = priorComments.some(c =>
-  c.user && c.user.type === 'Bot' && (c.body || '').includes(MARKER)
-);
 
 // --- Property verification against generated types (needs named properties + a type) ---
 // propertyVerification: { found: bool, url, type, version, property, results: [{name, found}] }
@@ -1451,21 +1417,31 @@ if (dedupeVerdictIsTrustworthy) {
 // --- Title normalization for confirmed missing-property issues ---
 // Also runs when the current title is bot-canonical, so earlier noisy renames
 // get corrected even after the docs check reclassifies the issue.
-const titleIsBotOwned = /^\s*\[Microsoft\.[^\]]+\]:\s+.+\s+propert(?:y|ies)\s+missing\s*$/i.test(issue.title || '');
+const titleIsBotOwned = new RegExp(`${BOT_TITLE_PREFIX}\\s+.+\\s+propert(?:y|ies)\\s+missing\\s*$`, 'i')
+  .test(issue.title || '');
 // Any `[Microsoft.X/y]: <description>` title — the shape we always own and
 // normalize, even when a reporter wrote the description.
-const titleIsResourcePrefixed = /^\s*\[Microsoft\.[^\]]+\]:\s+\S/i.test(issue.title || '');
+const titleIsResourcePrefixed = new RegExp(`${BOT_TITLE_PREFIX}\\s+\\S`, 'i').test(issue.title || '');
 // The unedited issue-template default title, left verbatim by the reporter.
 const titleIsPlaceholder = /^\s*\[\s*<?\s*resource[_\s]?type\s*>?\s*\]\s*:\s*<?\s*description\s*>?\s*$/i.test(issue.title || '');
 // A neutral category placeholder the bot generated. We own these and must
 // correct them when the category changes underneath us.
-const titleIsBotGeneric = /^\s*\[Microsoft\.[^\]]+\]:\s+(?:Missing property|Type is unavailable|Type issue|Inaccurate\/confusing description)\s*$/i.test(issue.title || '');
+const titleIsBotGeneric = botGenericTitleRe().test(issue.title || '');
+// `[<type>]: a, b properties missing` — the canonical mined title.
+const missingPropsTitle = () => {
+  const props = cls.propertyNames.slice(0, 3).join(', ');
+  const wordForm = cls.propertyNames.length > 1 ? 'properties' : 'property';
+  return `[${cls.types[0]}]: ${props} ${wordForm} missing`;
+};
+// Neutral title for the missing-ness categories when no property was mined.
+const genericMissingTitle = () =>
+  (cls.hasTypeUnavailableLanguage && !cls.hasMissingPropertyLanguage)
+    ? `[${cls.types[0]}]: Type is unavailable`
+    : `[${cls.types[0]}]: Missing property`;
 if (cls.propertyNames.length > 0 && cls.types.length > 0 &&
     (cls.hasMissingPropertyLanguage || titleIsBotOwned) &&
     !(propertyVerification && propertyVerification.found && !titleIsBotOwned)) {
-  const propsForTitle = cls.propertyNames.slice(0, 3).join(', ');
-  const wordForm = cls.propertyNames.length > 1 ? 'properties' : 'property';
-  const normalizedTitle = `[${cls.types[0]}]: ${propsForTitle} ${wordForm} missing`;
+  const normalizedTitle = missingPropsTitle();
   if (issue.title !== normalizedTitle) {
     await github.rest.issues.update({
       owner, repo, issue_number: num, title: normalizedTitle,
@@ -1478,9 +1454,7 @@ if (cls.propertyNames.length > 0 && cls.types.length > 0 &&
   // Either a title we generated or a freeform `[Microsoft.X/y]: <description>`,
   // and re-mining the body yields no property name. Normalize to a neutral,
   // category-appropriate title rather than leaving a wrong one in place.
-  const generic = (cls.hasTypeUnavailableLanguage && !cls.hasMissingPropertyLanguage)
-    ? `[${cls.types[0]}]: Type is unavailable`
-    : `[${cls.types[0]}]: Missing property`;
+  const generic = genericMissingTitle();
   if (issue.title !== generic) {
     await github.rest.issues.update({
       owner, repo, issue_number: num, title: generic,
@@ -1507,9 +1481,7 @@ if (cls.propertyNames.length > 0 && cls.types.length > 0 &&
   // category. Restore the reporter's original pre-rename title when we can
   // recover one that isn't itself a bot generic; otherwise leave it alone —
   // a placeholder like "Needs triage" reads oddly and buries the type.
-  const originalIsBotGeneric =
-    /^\s*\[Microsoft\.[^\]]+\]:\s+(?:Missing property|Type is unavailable|Type issue|Inaccurate\/confusing description|Needs triage)\s*$/i
-      .test(originalTitle || '');
+  const originalIsBotGeneric = botGenericTitleRe('Needs triage').test(originalTitle || '');
   if (originalTitle && originalTitle !== issue.title && !originalIsBotGeneric) {
     await github.rest.issues.update({
       owner, repo, issue_number: num, title: originalTitle,
@@ -1529,13 +1501,9 @@ if (cls.propertyNames.length > 0 && cls.types.length > 0 &&
   const isMissingCat = cls.hasMissingPropertyLanguage || cls.hasTypeUnavailableLanguage;
   let target;
   if (isMissingCat && cls.propertyNames.length > 0 && !verifiedFound) {
-    const props = cls.propertyNames.slice(0, 3).join(', ');
-    const wordForm = cls.propertyNames.length > 1 ? 'properties' : 'property';
-    target = `[${cls.types[0]}]: ${props} ${wordForm} missing`;
+    target = missingPropsTitle();
   } else if (isMissingCat) {
-    target = (cls.hasTypeUnavailableLanguage && !cls.hasMissingPropertyLanguage)
-      ? `[${cls.types[0]}]: Type is unavailable`
-      : `[${cls.types[0]}]: Missing property`;
+    target = genericMissingTitle();
   } else {
     // Type-issue-only placeholder (inaccurate property type/desc).
     target = `[${cls.types[0]}]: Type issue`;
